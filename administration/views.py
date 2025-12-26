@@ -232,29 +232,45 @@ class GestionMembresViewSet(viewsets.ViewSet):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
+            # On recupere le montant que devait payer le membre a partir du premier paiement
+            premier_paiement = PaiementInscription.objects.filter(
+                membre=membre
+            ).order_by('date_paiement').first()
+
+            if premier_paiement:
+                montant_inscription_du = premier_paiement.montant_inscription_du
+            else:
+                # Utiliser la config par défaut si pas encore payé
+                montant_inscription_du = ConfigurationMutuelle.get_configuration().montant_inscription            
+            print(f"📝 Paiement suivant: montant dû = {montant_inscription_du}")
             paiement = PaiementInscription.objects.create(
                 membre=membre,
                 montant=serializer.validated_data['montant'],
                 session=session,
-                notes=serializer.validated_data.get('notes', '')
+                notes=serializer.validated_data.get('notes', ''),
+                montant_inscription_du=montant_inscription_du
             )
-            
+            #Mettre a jour inscription_terminee
+            if membre.update_inscription_terminee() :
+                #print("%%%%%%%%%%%%%%%%Inscription termiee pour le membre")
+                membre.save()            
+
             # Mettre à jour le statut du membre si inscription complète
             config = ConfigurationMutuelle.get_configuration()
             total_paye = PaiementInscription.objects.filter(
                 membre=membre
             ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
             
-            if total_paye >= config.montant_inscription and membre.statut != 'EN_REGLE':
+            if total_paye >= paiement.montant_inscription_du and membre.statut != 'EN_REGLE':
                 
                 try:
-                    if membre.calculer_statut_en_regle() :
+                    if membre.calculer_statut_en_regle() == "EN_REGLE":
                         membre.statut = 'EN_REGLE'
                         membre.save()
                 except e :
-                    print(f"Erreur de calcul de sttus en regle : {e} ")
+                    print(f"Erreur de calcul de statut en regle : {e} ")
                     pass
-                print("MEMEBRE EN REGLE POUR INSCRIPTION")
+                print("MEMBRE EN REGLE POUR INSCRIPTION")
             
             return Response({
                 'message': 'Paiement inscription ajouté avec succès',
@@ -846,12 +862,9 @@ class GestionMembresViewSet(viewsets.ViewSet):
         """
         Créer un membre complet (utilisateur + membre) en une seule fois
         """
-        print("*****************REQUETE DE CREATION DE MEMEBRE***************************")
+        print("*****************REQUETE DE CREATION DE MEMBRE***************************")
         print(request.data)
         print("****************************************************************************")
-        
-        
-        
         
         try:
             serializer = CreerMembreCompletSerializer(data=request.data)
@@ -909,24 +922,39 @@ class GestionMembresViewSet(viewsets.ViewSet):
                     date_inscription=serializer.validated_data.get('date_inscription', timezone.now().date()),
                     exercice_inscription=exercice_actuel,
                     session_inscription=session_actuelle,
-                    statut='NON_EN_REGLE'  # Par défaut
+                    statut = 'NON_DEFINI'  # Par défaut
                 )
                 
                 # 3. Optionnel : ajouter un paiement d'inscription initial
                 montant_initial = serializer.validated_data.get('montant_inscription_initial')
                 if montant_initial and montant_initial > 0:
+                    config = ConfigurationMutuelle.get_configuration()
                     PaiementInscription.objects.create(
                         membre=membre,
                         montant=montant_initial,
                         session=session_actuelle,
-                        notes="Paiement initial lors de la création"
+                        notes="Paiement initial lors de la création",
+                        montant_inscription_du = config.montant_inscription
                     )
+
+                    #Apres avoir enregistre le paiement, on met a jour inscription_terminee
+                    print('%%%%%%%%%%%mise a jour de insctiption_termine')
+                    membre.update_inscription_terminee()
+                    print(membre.update_inscription_terminee())
+                    membre.save()
                     
-                    # Vérifier si inscription complète
-                    config = ConfigurationMutuelle.get_configuration()
-                    if montant_initial >= config.montant_inscription:
+                    # ✅ CORRECTION: Déterminer le statut selon la même logique que core/utils.py
+                    # Un membre ne peut passer "EN_REGLE" que si le nombre de sessions >= 3
+                    peut_definir_statuts = Membre.peut_definir_statuts_membre(membre)
+                    
+                    if peut_definir_statuts and montant_initial >= config.montant_inscription:
+                        # Les statuts peuvent être définis ET inscription complète
                         membre.statut = 'EN_REGLE'
-                        membre.save()
+                    else:
+                        # Avant 3 sessions ou inscription incomplète -> statut NON_DEFINI
+                        membre.statut = 'NON_DEFINI'
+                    
+                    membre.save()
                 
                 return Response({
                     'message': 'Membre créé avec succès',
