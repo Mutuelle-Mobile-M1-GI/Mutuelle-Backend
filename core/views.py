@@ -364,15 +364,34 @@ class MembreViewSet(viewsets.ModelViewSet):
 
 class TypeAssistanceViewSet(viewsets.ModelViewSet):
     """
-    ViewSet pour les types d'assistance
+    ViewSet pour gérer les types d'assistance (CRUD complet)
     """
-    queryset = TypeAssistance.objects.all()
+    queryset = TypeAssistance.objects.all().order_by('nom')
     serializer_class = TypeAssistanceSerializer
-    filterset_fields = ['actif', 'montant']
+    permission_classes = [IsAdminOrReadOnly]
     search_fields = ['nom', 'description']
+    filterset_fields = ['actif', 'montant']
     ordering_fields = ['nom', 'montant', 'date_creation']
     ordering = ['nom']
-    permission_classes = [IsAdminOrReadOnly]
+
+    def get_queryset(self):
+        if self.request.user.is_staff or self.request.user.is_superuser:
+            return TypeAssistance.objects.all().order_by('nom')
+        return TypeAssistance.objects.filter(actif=True).order_by('nom')
+
+    @action(detail=False, methods=['get'], permission_classes=[AllowAny])
+    def actifs(self, request):
+        types_actifs = TypeAssistance.objects.filter(actif=True).order_by('nom')
+        serializer = self.get_serializer(types_actifs, many=True)
+        return Response(serializer.data)
+
+    def perform_destroy(self, instance):
+        from .models import Assistance
+        if Assistance.objects.filter(type_assistance=instance).exists():
+            raise serializers.ValidationError(
+                "Impossible de supprimer ce type car il est utilisé dans une ou plusieurs demandes d'assistance."
+            )
+        instance.delete()
 
 class FondsSocialViewSet(viewsets.ReadOnlyModelViewSet):
     """
