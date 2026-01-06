@@ -25,19 +25,21 @@ def calculer_fonds_social_total():
 
 def calculer_cumul_epargnes_total():
     """
-    Calcule le cumul total des épargnes de tous les membres (le trésor)
+    Calcule le cumul total des fonds (épargne + gains) de tous les membres
     """
     from core.models import Membre
+    from decimal import Decimal
     
-    total_epargnes = Decimal('0')
+    total_tresor = Decimal('0')
     membres_actifs = Membre.objects.filter(statut__in=['EN_REGLE', 'NON_EN_REGLE'])
     
     for membre in membres_actifs:
-        epargne_membre = membre.calculer_epargne_totale()
-        total_epargnes += epargne_membre
+        # On utilise solde_total_global qui fait : calculer_epargne_pure + calculer_total_gains
+        solde_membre = membre.solde_total_global
+        total_tresor += solde_membre
     
     return {
-        'cumul_total_epargnes': total_epargnes,
+        'cumul_total_epargnes': total_tresor,
         'nombre_membres': membres_actifs.count()
     }
 
@@ -75,7 +77,7 @@ def calculer_donnees_membre_completes(membre):
     Cette fonction est cruciale car elle retourne toutes les informations
     que le frontend doit afficher selon les spécifications
     """
-    from core.models import ConfigurationMutuelle, Session
+    from core.models import ConfigurationMutuelle, Session,Exercice
     from transactions.models import (
         PaiementInscription, PaiementSolidarite, EpargneTransaction,
         Emprunt, Renflouement
@@ -167,10 +169,10 @@ def calculer_donnees_membre_completes(membre):
     
     # 4. EMPRUNTS
     emprunt_en_cours = Emprunt.objects.filter(
-        membre=membre,
-        statut='EN_COURS'
+     membre=membre,
+     statut='EN_COURS'
     ).first()
-    
+
     emprunt_data = {
         'a_emprunt_en_cours': emprunt_en_cours is not None,
         'montant_emprunt_en_cours': emprunt_en_cours.montant_emprunte if emprunt_en_cours else Decimal('0'),
@@ -178,16 +180,37 @@ def calculer_donnees_membre_completes(membre):
         'montant_deja_rembourse': emprunt_en_cours.montant_rembourse if emprunt_en_cours else Decimal('0'),
         'montant_restant_a_rembourser': emprunt_en_cours.montant_restant_a_rembourser if emprunt_en_cours else Decimal('0'),
         'pourcentage_rembourse': emprunt_en_cours.pourcentage_rembourse if emprunt_en_cours else 0,
-        'nombre_emprunts_total': Emprunt.objects.filter(membre=membre).count()
-    }
-    
-    # Calcul du montant maximum empruntable
+        'nombre_emprunts_total': Emprunt.objects.filter(membre=membre).count(),
+        'montant_max_empruntable': Decimal('0')
+        }
+
+
+    montant_max_empruntable = Decimal('0')
+    exercice = None  
+
+
     if not emprunt_en_cours and epargne_totale > 0:
-        montant_max_empruntable = epargne_totale * config.coefficient_emprunt_max
-    else:
-        montant_max_empruntable = Decimal('0')
+        exercice = Exercice.get_exercice_en_cours() # Requiert l'import d'Exercice au début de la fonction
     
-    emprunt_data['montant_max_empruntable'] = montant_max_empruntable
+        if exercice:
+        # On cherche la tranche qui correspond à l'épargne actuelle
+            tier = exercice.emprunt_tiers.filter(
+                min_amount__lte=epargne_totale,
+                max_amount__gte=epargne_totale
+                ).first()
+            if tier:
+            # Calcul : Epargne * Coefficient de la tranche
+                    montant_calcule = epargne_totale * Decimal(str(tier.coefficient))
+            # On applique le plafond (max_cap) s'il existe
+                    if tier.max_cap and tier.max_cap > 0:
+                        montant_max_empruntable = min(montant_calcule, tier.max_cap)
+                    else:
+                        montant_max_empruntable = montant_calcule
+                    print(f"SUCCESS: Tranche {tier.id} trouvée. Max empruntable: {montant_max_empruntable}")
+        else:
+            print(f"ERROR: Aucune tranche trouvée pour l'épargne {epargne_totale}")
+        emprunt_data['montant_max_empruntable'] = montant_max_empruntable
+   
     
     # 5. RENFLOUEMENTS
     renflouements_dus = Renflouement.objects.filter(membre=membre)
