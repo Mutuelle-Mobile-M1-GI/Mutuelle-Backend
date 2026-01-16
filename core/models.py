@@ -33,11 +33,6 @@ class ConfigurationMutuelle(models.Model):
         validators=[MinValueValidator(0)],
         verbose_name="Taux d'intérêt (%)"
     )
-    coefficient_emprunt_max = models.IntegerField(
-        default=MUTUELLE_DEFAULTS["LOAN_MULTIPLIER"],
-        validators=[MinValueValidator(1)],
-        verbose_name="Coefficient multiplicateur max pour emprunts"
-    )
     duree_exercice_mois = models.IntegerField(
         default=MUTUELLE_DEFAULTS["EXERCISE_DURATION_MONTHS"],
         validators=[MinValueValidator(1)],
@@ -60,7 +55,104 @@ class ConfigurationMutuelle(models.Model):
         if not config:
             config = cls.objects.create()
         return config
+    
+class Interet(models.Model):
+    """
+    Table stockant les gains générés par les intérêts des emprunts,
+    redistribués au prorata de l'épargne des membres.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    # Bénéficiaire de la part d'intérêt
+    membre = models.ForeignKey(
+        'Membre', 
+        on_delete=models.CASCADE, 
+        related_name='gains_interets',
+        verbose_name="Membre bénéficiaire"
+    )
+    
+    # L'emprunt qui a généré cet intérêt
+    emprunt_source = models.ForeignKey(
+        'transactions.Emprunt', # Ajuste le chemin selon ton dossier transactions
+        on_delete=models.CASCADE,
+        related_name='redistributions',
+        verbose_name="Emprunt source"
+    )
+    
+    # Contexte temporel
+    exercice = models.ForeignKey(
+        'Exercice', 
+        on_delete=models.CASCADE, 
+        verbose_name="Exercice"
+    )
+    session = models.ForeignKey(
+        'Session', 
+        on_delete=models.CASCADE, 
+        verbose_name="Session de distribution"
+    )
+    
+    # Données financières
+    montant = models.DecimalField(
+        max_digits=12, 
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.00'))],
+        verbose_name="Montant perçu (FCFA)"
+    )
+    
+    # Trçabilité
+    date_distribution = models.DateTimeField(auto_now_add=True)
 
+    class Meta:
+        verbose_name = "Intérêt redistribué"
+        verbose_name_plural = "Intérêts redistribués"
+        ordering = ['-date_distribution']
+
+    def __str__(self):
+        return f"Gain {self.montant:,.0f} FCFA - {self.membre.utilisateur.nom_complet} (Session {self.session.nom})"
+
+class EmpruntCoefficientTier(models.Model):
+    exercise = models.ForeignKey(
+        'Exercice',
+        on_delete=models.CASCADE,
+        related_name='emprunt_tiers',
+        verbose_name="Exercice"
+    )
+    min_amount = models.PositiveBigIntegerField(
+        verbose_name="Montant minimum (FCFA)",
+        validators=[MinValueValidator(0)]
+    )
+    max_amount = models.PositiveBigIntegerField(
+        verbose_name="Montant maximum (FCFA)",
+    )
+    coefficient = models.DecimalField(
+        verbose_name="Coefficient",
+        max_digits=5,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.01'))]
+    )
+    max_cap = models.PositiveBigIntegerField(
+        verbose_name="Plafond absolu (optionnel)",
+        null=True,
+        blank=True,
+        help_text="Ex: 2 000 000 FCFA – seulement pour la première tranche"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Tranche coefficient emprunt"
+        verbose_name_plural = "Tranches coefficients emprunt"
+        unique_together = ('exercise', 'min_amount')
+        ordering = ['min_amount']
+
+    def __str__(self):
+        cap = f" (max {self.max_cap:,} FCFA)" if self.max_cap else ""
+        return f"{self.min_amount:,} – {self.max_amount:,} × {self.coefficient}{cap}"
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        if self.min_amount >= self.max_amount:
+            raise ValidationError("min_amount doit être strictement inférieur à max_amount")
 
 
 
@@ -707,25 +799,27 @@ class Membre(models.Model):
         return self.statut == 'EN_REGLE'
     
 
-    def calculer_epargne_totale(self):
-        """Calcule l'épargne totale du membre"""
+    def calculer_epargne_pure(self):
+   
         from transactions.models import EpargneTransaction
-        
-        transactions = EpargneTransaction.objects.filter(membre=self)
-        
-        depots = transactions.filter(type_transaction='DEPOT').aggregate(
-            total=Sum('montant'))['total'] or Decimal('0')
-        
-        retraits = transactions.filter(type_transaction='RETRAIT_PRET').aggregate(
-            total=Sum('montant'))['total'] or Decimal('0')
-        
-        interets = transactions.filter(type_transaction='AJOUT_INTERET').aggregate(
-            total=Sum('montant'))['total'] or Decimal('0')
-        
-        retours = transactions.filter(type_transaction='RETOUR_REMBOURSEMENT').aggregate(
-            total=Sum('montant'))['total'] or Decimal('0')
-        
-        return depots - retraits + interets + retours
+        from django.db.models import Sum
+    
+    # La méthode la plus robuste : faire la somme de TOUS les montants
+    # Si le signe est bien géré en base (-97000 pour un retrait), Sum() fait tout le travail.
+        total = EpargneTransaction.objects.filter(membre=self).aggregate(
+             solde=Sum('montant')
+        )['solde']
+    
+        return total or Decimal('0.00')
+
+    def calculer_total_gains(self):
+        """L'argent gagné via les intérêts (Nouvelle Table)"""
+        return self.gains_interets.aggregate(total=Sum('montant'))['total'] or Decimal('0')
+
+    @property
+    def solde_total_global(self):
+        """Ce que le membre voit sur son compte (Épargne + Gains)"""
+        return self.calculer_epargne_pure() + self.calculer_total_gains()
     
     def get_donnees_completes(self):
         """Retourne toutes les données financières du membre"""
@@ -733,27 +827,48 @@ class Membre(models.Model):
         return calculer_donnees_membre_completes(self)
     
     def peut_emprunter(self, montant):
-        """Vérifie si le membre peut emprunter un montant donné"""
-        from core.models import ConfigurationMutuelle
+        """Vérifie si le membre peut emprunter un montant donné (nouvelle logique par tranches)"""
         from transactions.models import Emprunt
-        
-        # Vérifier qu'il n'a pas d'emprunt en cours
+
+        # 1. Vérifier qu'il n'a pas d'emprunt en cours
         if Emprunt.objects.filter(membre=self, statut='EN_COURS').exists():
             return False, "Vous avez déjà un emprunt en cours"
-        
-        # Vérifier qu'il est en règle
+
+        # 2. Vérifier qu'il est en règle
         if not self.is_en_regle:
             return False, "Vous devez être en règle pour emprunter"
-        
-        # Vérifier le montant maximum
-        config = ConfigurationMutuelle.get_configuration()
-        epargne_totale = self.calculer_epargne_totale()
-        montant_max = epargne_totale * config.coefficient_emprunt_max
-        
+
+        # 3. Récupérer l'exercice en cours
+        exercice = Exercice.get_exercice_en_cours()
+        if not exercice:
+            return False, "Aucun exercice en cours"
+
+        # 4. Récupérer l'épargne totale
+        epargne_totale = self.calculer_epargne_pure()
+        if epargne_totale <= 0:
+            return False, "Épargne insuffisante"
+
+        # 5. Trouver la tranche correspondante
+        tier = exercice.emprunt_tiers.filter(
+            min_amount__lte=epargne_totale,
+            max_amount__gte=epargne_totale
+        ).first()
+
+        if not tier:
+            return False, "Aucune règle de coefficient trouvée pour votre épargne"
+
+        # 6. Calculer le montant max
+        montant_max = Decimal(epargne_totale) * tier.coefficient
+        if tier.max_cap:
+            montant_max = min(montant_max, tier.max_cap)
+
         if montant > montant_max:
-            return False, f"Montant maximum empruntable: {montant_max:,.0f} FCFA"
-        
-        return True, "Emprunt autorisé"
+            return False, f"Montant maximum empruntable: {int(montant_max):,} FCFA"
+
+        return True, f"Emprunt autorisé (max: {int(montant_max):,} FCFA)"
+
+    # ... reste de ton code Membre inchangé ...
+
     
     def calculer_statut_en_regle(self):
         """Calcule si le membre est en règle selon tous les critères"""
@@ -972,3 +1087,5 @@ class MouvementFondsSocial(models.Model):
     def __str__(self):
         signe = "+" if self.type_mouvement == 'ENTREE' else "-"
         return f"{signe}{self.montant:,.0f} FCFA - {self.description[:50]}"
+    # mutuelle/models.py  (ou où tu mets tes modèles)
+

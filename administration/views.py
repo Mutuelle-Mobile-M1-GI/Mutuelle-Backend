@@ -516,13 +516,18 @@ class GestionMembresViewSet(viewsets.ViewSet):
                     'error': error_msg
                 }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-            # 🔧 ÉTAPE 7: Création de l'emprunt avec transaction
+            # 🔧 ÉTAPE 7: Création de l'emprunt avec transaction (Logique Escompte)
             print("🔍 ÉTAPE 7: Création de l'emprunt et transaction épargne")
             notes = serializer.validated_data.get('notes', '')
             try:
                 from django.db import transaction as db_transaction
                 with db_transaction.atomic():
                     print("🔍 Début transaction DB...")
+                    
+                    # 1. Création de l'objet Emprunt
+                    # Le frontend envoie 100 000 (montant_decimal)
+                    # Le save() du modèle va stocker 97 000 dans montant_emprunte
+                    # et 100 000 dans montant_total_a_rembourser
                     emprunt = Emprunt.objects.create(
                         membre=membre,
                         montant_emprunte=montant_decimal,
@@ -530,49 +535,59 @@ class GestionMembresViewSet(viewsets.ViewSet):
                         session_emprunt=session,
                         notes=notes
                     )
-                    print(f"✅ Emprunt créé: {emprunt.id} pour {emprunt.montant_emprunte} F à {emprunt.taux_interet}%")
-                    # Créer la transaction d'épargne (retrait pour prêt)
+                    
+                    # Important : On récupère la valeur après le calcul du modèle (97 000)
+                    montant_net_decaisse = emprunt.montant_emprunte
+                    
+                    print(f"✅ Emprunt créé: {emprunt.id}")
+                    print(f"✅ Dette stockée (Nominal): {emprunt.montant_total_a_rembourser}")
+                    print(f"✅ Cash sorti (Net): {montant_net_decaisse}")
+
+                    # 2. Créer la transaction d'épargne avec le montant RÉELLEMENT décaissé
+                    # On utilise le signe NEGATIF (-) devant les 97 000
                     EpargneTransaction.objects.create(
                         membre=membre,
                         type_transaction='RETRAIT_PRET',
-                        montant=-montant_decimal,  # Négatif car c'est un retrait
+                        montant=-montant_net_decaisse,  
                         session=session,
-                        notes=f"Retrait pour emprunt {emprunt.id}"
+                        notes=f"Retrait pour prêt {emprunt.id} (Net décaissé)"
                     )
-                    print(f"✅ Transaction épargne créée pour emprunt {emprunt.id}")
+                    
+                    print(f"✅ Transaction épargne de -{montant_net_decaisse} FCFA créée")
+
+                    # 3. Préparer la réponse
                     emprunt.refresh_from_db()
                     response_data = {
                         'message': 'Emprunt créé avec succès',
                         'emprunt_id': str(emprunt.id),
-                        'montant_emprunte': float(emprunt.montant_emprunte),
-                        'montant_a_rembourser': float(getattr(emprunt, 'montant_total_a_rembourser', 0)),
+                        'montant_de_votre_poche': float(emprunt.montant_emprunte), # 97 000
+                        'montant_a_rembourser_plus_tard': float(emprunt.montant_total_a_rembourser), # 100 000
+                        'interets_retenus': float(emprunt.montant_total_a_rembourser - emprunt.montant_emprunte), # 3 000
                         'taux_interet': float(emprunt.taux_interet)
                     }
+                    
                     print(f"✅ Données de réponse: {response_data}")
                     print("=" * 100)
                     return Response(response_data, status=status.HTTP_201_CREATED)
+
             except Exception as e:
                 print(f"❌ EXCEPTION LORS DE LA CRÉATION: {str(e)}")
-                print(f"❌ TYPE D'EXCEPTION: {type(e)}")
                 import traceback
                 print(f"❌ TRACEBACK COMPLET:\n{traceback.format_exc()}")
                 print("=" * 100)
                 return Response({
                     'error': 'Erreur lors de la création de l\'emprunt',
-                    'details': str(e),
-                    'type': str(type(e))
+                    'details': str(e)
                 }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         except Exception as e:
             print(f"❌ EXCEPTION GÉNÉRALE: {str(e)}")
-            print(f"❌ TYPE D'EXCEPTION: {type(e)}")
             import traceback
             print(f"❌ TRACEBACK COMPLET:\n{traceback.format_exc()}")
             print("=" * 100)
             return Response({
                 'error': 'Erreur interne du serveur',
-                'details': str(e),
-                'type': str(type(e))
+                'details': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
 
@@ -1084,5 +1099,27 @@ class RapportsViewSet(viewsets.ViewSet):
         if total_du == 0:
             return 100
         return float((total_paye / total_du) * 100)
+    
+    # administration/views.py
+
+from rest_framework import viewsets, permissions
+from core.models import EmpruntCoefficientTier # Vérifie que c'est bien ce nom dans models.py
+from .serializers import EmpruntCoefficientTierSerializer
+
+class EmpruntCoefficientTierViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet pour gérer les tranches de coefficients d'emprunt.
+    """
+    queryset = EmpruntCoefficientTier.objects.all()
+    serializer_class = EmpruntCoefficientTierSerializer
+    permission_classes = [permissions.IsAuthenticated] # Optionnel: restreindre aux admin plus tard
+
+    # Filtrage optionnel : pour ne récupérer que les tranches d'un exercice précis
+    def get_queryset(self):
+        queryset = EmpruntCoefficientTier.objects.all()
+        exercice_id = self.request.query_params.get('exercice', None)
+        if exercice_id is not None:
+            queryset = queryset.filter(exercice_id=exercice_id)
+        return queryset
     
     

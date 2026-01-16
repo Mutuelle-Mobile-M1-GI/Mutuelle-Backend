@@ -6,12 +6,12 @@ from django_filters import rest_framework as filters
 from django.db import models
 from .models import (
     ConfigurationMutuelle, Exercice, Session, TypeAssistance, 
-    Membre, FondsSocial
+    Membre, FondsSocial, EmpruntCoefficientTier
 )
 from .serializers import (
     ConfigurationMutuelleSerializer, ExerciceSerializer, SessionSerializer,
     TypeAssistanceSerializer, MembreSerializer, FondsSocialSerializer,
-    DonneesAdministrateurSerializer
+    DonneesAdministrateurSerializer,EmpruntCoefficientTierSerializer
 )
 from .utils import calculer_donnees_administrateur
 from authentication.permissions import IsAdministrateur, IsAdminOrReadOnly
@@ -33,7 +33,6 @@ class ConfigurationMutuelleFilter(filters.FilterSet):
             'montant_inscription': ['exact', 'gte', 'lte'],
             'montant_solidarite': ['exact', 'gte', 'lte'],
             'taux_interet': ['exact', 'gte', 'lte'],
-            'coefficient_emprunt_max': ['exact', 'gte', 'lte'],
             'duree_exercice_mois': ['exact', 'gte', 'lte'],
         }
 
@@ -448,3 +447,62 @@ def donnees_administrateur(request):
     donnees = calculer_donnees_administrateur()
     serializer = DonneesAdministrateurSerializer(donnees)
     return Response(serializer.data)
+
+class EmpruntCoefficientTierViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet pour gérer les tranches de coefficient d'emprunt par exercice
+    """
+    queryset = EmpruntCoefficientTier.objects.select_related('exercise').all()
+    serializer_class = EmpruntCoefficientTierSerializer
+    permission_classes = [IsAdminOrReadOnly]  # Admin seulement pour modifier
+
+    def get_queryset(self):
+        """
+        Par défaut : ne retourne que les tranches de l'exercice en cours
+        Avec ?exercise_id=xxx → retourne celles de cet exercice
+        """
+        exercise_id = self.request.query_params.get('exercise_id')
+        if exercise_id:
+            return self.queryset.filter(exercise_id=exercise_id).order_by('min_amount')
+        
+        # Par défaut → exercice en cours
+        exercice = Exercice.get_exercice_en_cours()
+        if exercice:
+            return self.queryset.filter(exercise=exercice).order_by('min_amount')
+        return self.queryset.none()
+
+    @action(detail=False, methods=['post'], url_path='bulk-upsert')
+    def bulk_upsert(self, request):
+        """
+        Remplace TOUTES les tranches d'un exercice donné
+        Utilisé lors de la création d'un nouvel exercice avec copie/modification
+        Body:
+        {
+            "exercise_id": "uuid-de-lexercice",
+            "tiers": [
+                { "min_amount": 0, "max_amount": 500000, "coefficient": "6.00", "max_cap": 2500000 },
+                ...
+            ]
+        }
+        """
+        exercise_id = request.data.get('exercise_id')
+        tiers_data = request.data.get('tiers', [])
+
+        if not exercise_id:
+            return Response({"detail": "exercise_id est requis"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not isinstance(tiers_data, list) or len(tiers_data) == 0:
+            return Response({"detail": "Le champ 'tiers' doit être une liste non vide"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Suppression des anciennes tranches
+        deleted_count, _ = EmpruntCoefficientTier.objects.filter(exercise_id=exercise_id).delete()
+
+        # Création des nouvelles
+        serializer = self.get_serializer(data=tiers_data, many=True)
+        serializer.is_valid(raise_exception=True)
+        instances = serializer.save(exercise_id=exercise_id)
+
+        return Response({
+            "detail": f"{len(instances)} tranches créées (supprimées: {deleted_count})",
+            "tiers": serializer.data
+        }, status=status.HTTP_201_CREATED)

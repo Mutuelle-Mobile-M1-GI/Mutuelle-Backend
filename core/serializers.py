@@ -27,11 +27,12 @@ class ExerciceSerializer(serializers.ModelSerializer):
     nombre_sessions = serializers.SerializerMethodField()
     fonds_social_info = serializers.SerializerMethodField()
     
+    
     class Meta:
         model = Exercice
         fields = [
             'id', 'nom', 'date_debut', 'date_fin', 'statut', 'description',
-            'is_en_cours', 'nombre_sessions', 'fonds_social_info',
+            'is_en_cours', 'nombre_sessions', 'fonds_social_info','emprunt_tiers',
             'date_creation', 'date_modification'
         ]
     
@@ -210,3 +211,38 @@ class DonneesAdministrateurSerializer(serializers.Serializer):
             'en_cours': sessions_en_cours,
             'terminees': sessions_terminees
         }
+from .models import EmpruntCoefficientTier
+class EmpruntCoefficientTierSerializer(serializers.ModelSerializer):
+    """
+    Serializer pour les tranches de coefficient d'emprunt
+    Utilisé dans la création d'exercice + paramètres
+    """
+    class Meta:
+        model = EmpruntCoefficientTier
+        fields = [
+            'id',
+            'min_amount',
+            'max_amount',
+            'coefficient',
+            'max_cap',
+            'created_at',
+            'updated_at'
+        ]
+        read_only_fields = ['created_at', 'updated_at']
+
+    def validate(self, attrs):
+        if attrs['min_amount'] >= attrs['max_amount']:
+            raise serializers.ValidationError(
+                "Le montant minimum doit être strictement inférieur au montant maximum"
+            )
+        return attrs
+
+    # Optionnel : affichage lisible dans les logs/admin
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data['display'] = (
+            f"{instance.min_amount:,} → {instance.max_amount:,} "
+            f"× {instance.coefficient}"
+            + (f" (max {instance.max_cap:,} FCFA)" if instance.max_cap else "")
+        )
+        return data
