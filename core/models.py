@@ -2,6 +2,8 @@ from django.db import models
 from django.core.validators import MinValueValidator
 from django.conf import settings
 import uuid
+from django.db.models import F 
+from django.utils import timezone
 from decimal import Decimal, ROUND_HALF_UP
 from django.db.models import Sum, Q
 from Backend.settings import MUTUELLE_DEFAULTS
@@ -10,6 +12,7 @@ from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from django.db import models
 import uuid
+import re
 from django.db import models, transaction
 from django.core.exceptions import ValidationError
 
@@ -877,13 +880,29 @@ class Membre(models.Model):
     
     def save(self, *args, **kwargs):
         if not self.numero_membre:
-            # Génération automatique du numéro de membre
-            last_member = Membre.objects.order_by('numero_membre').last()
-            if last_member:
-                last_number = int(last_member.numero_membre.split('-')[-1])
-                self.numero_membre = f"ENS-{last_number + 1:04d}"
-            else:
-                self.numero_membre = "ENS-0001"
+            # Génération atomique et robuste du numéro de membre
+            with transaction.atomic():
+                # Verrouille la dernière ligne créée pour réduire les risques de course
+                last_member = Membre.objects.select_for_update().order_by('-date_creation').first()
+                if last_member and getattr(last_member, 'numero_membre', None):
+                    m = re.search(r"(\d+)$", str(last_member.numero_membre))
+                    if m:
+                        try:
+                            start = int(m.group(1)) + 1
+                        except Exception:
+                            start = 1
+                    else:
+                        start = 1
+                else:
+                    start = 1
+
+                # Boucle jusqu'à trouver un numéro non utilisé (protégée par la transaction)
+                while True:
+                    candidate = f"ENS-{start:04d}"
+                    if not Membre.objects.filter(numero_membre=candidate).exists():
+                        self.numero_membre = candidate
+                        break
+                    start += 1
         super().save(*args, **kwargs)
     
     @classmethod
@@ -1031,18 +1050,30 @@ class FondsSocial(models.Model):
         return None
     
     def ajouter_montant(self, montant, description=""):
-        """Ajoute un montant au fonds social"""
-        self.montant_total += montant
-        self.save()
+        """Ajoute un montant au fonds social de manière atomique et crée le mouvement."""
         
-        # Log de l'opération
+        if montant <= 0:
+            return
+
+        # 1. MISE À JOUR ATOMIQUE DU SOLDE
+        # Nous utilisons update() avec F() pour garantir la sécurité
+        FondsSocial.objects.filter(pk=self.pk).update(
+            montant_total=F('montant_total') + montant,
+            date_modification=timezone.now() # Optionnel, mais bon pour la traçabilité
+        )
+        
+        # Recharger l'instance pour obtenir le nouveau montant total (si besoin pour un log immédiat)
+        self.refresh_from_db() 
+        
+        # 2. Log de l'opération (Création du Mouvement)
         MouvementFondsSocial.objects.create(
             fonds_social=self,
             type_mouvement='ENTREE',
             montant=montant,
             description=description
         )
-        print(f"Fonds Social: +{montant:,.0f} FCFA - {description}")
+        
+        print(f"Fonds Social (via F()): +{montant:,.0f} FCFA - {description}")
     
     def retirer_montant(self, montant, description=""):
         """Retire un montant du fonds social"""

@@ -3,7 +3,8 @@ from django.core.validators import MinValueValidator
 from django.conf import settings
 from decimal import Decimal, ROUND_HALF_UP
 import uuid
-from core.models import Membre, Session, Exercice, TypeAssistance,Interet
+from django.db import transaction
+from core.models import Membre, Session, Exercice, TypeAssistance,Interet,FondSocial
 from decimal import Decimal, ROUND_HALF_UP
 from django.db.models import Sum, Q
 from django.utils import timezone
@@ -41,48 +42,62 @@ class PaiementInscription(models.Model):
         ordering = ['-date_paiement']
         
     def save(self, *args, **kwargs):
-        is_new = self.pk is None
-        
-        # ✅ LOGIC AMÉLIORÉE: Gérer le montant_inscription_du
-        if is_new:
-            # Pour le premier paiement, enregistrer le montant actuel de la config
-            premier_paiement = PaiementInscription.objects.filter(
-                membre=self.membre
-            ).exists()
+        # Sauvegarde et alimentation du fonds social en transaction
+        with transaction.atomic():
+            is_new = getattr(self, '_state', None) and getattr(self._state, 'adding', True)
+            if is_new and self.montant and self.montant > 0:
+                try:
+                    fonds = FondsSocial.get_fonds_actuel()
+                    if fonds:
+                        desc = f"Inscription {self.membre.numero_membre} - Session {self.session.nom}"
+                        fonds.ajouter_montant(self.montant, description=desc)
+                    else:
+                        print("Aucun fonds social actuel trouvé pour l'inscription")
+                except Exception as e:
+                    print(f"Erreur alimentation fonds pour inscription: {e}")
             
-            if not premier_paiement:
-                # C'est le PREMIER paiement d'inscription de ce membre
-                from core.models import ConfigurationMutuelle
-                config = ConfigurationMutuelle.get_configuration()
-                self.montant_inscription_du = config.montant_inscription
-                print(f"📝 Premier paiement inscription: montant dû = {self.montant_inscription_du}")
-            else:
-                # C'est un paiement suivant, récupérer le montant du premier paiement
-                self.montant_inscription_du = premier_paiement.montant_inscription_du
-                print(f"📝 Paiement suivant: montant dû = {self.montant_inscription_du}")
-        
-        super().save(*args, **kwargs)
-        
-        # ✅ Mettre à jour le statut inscription_terminee du membre
-        if is_new:
-            print('%%%%%%%%%%%mise a jour de insctiption_termine')
-            self.membre.update_inscription_terminee()
-            print(self.membre.update_inscription_terminee())
-            self.membre.save()
-        
-        # Alimenter le fonds social
-        if is_new:
-            from core.models import FondsSocial
-            fonds = FondsSocial.get_fonds_actuel()
-            if fonds:
-                fonds.ajouter_montant(
-                    self.montant,
-                    f"Inscription {self.membre.numero_membre} - Session {self.session.nom}"
-                )
+            is_new = self.pk is None
+            # ✅ LOGIC AMÉLIORÉE: Gérer le montant_inscription_du
+            if is_new:
+                # Pour le premier paiement, enregistrer le montant actuel de la config
+                premier_paiement = PaiementInscription.objects.filter(
+                    membre=self.membre
+                ).exists()
+
+                if not premier_paiement:
+                    # C'est le PREMIER paiement d'inscription de ce membre
+                    from core.models import ConfigurationMutuelle
+                    config = ConfigurationMutuelle.get_configuration()
+                    self.montant_inscription_du = config.montant_inscription
+                    print(f"📝 Premier paiement inscription: montant dû = {self.montant_inscription_du}")
+                else:
+                    # C'est un paiement suivant, récupérer le montant du premier paiement
+                    self.montant_inscription_du = premier_paiement.montant_inscription_du
+                    print(f"📝 Paiement suivant: montant dû = {self.montant_inscription_du}")
+
+            super().save(*args, **kwargs)
+
+            # ✅ Mettre à jour le statut inscription_terminee du membre
+            if is_new:
+                print('%%%%%%%%%%%mise a jour de insctiption_termine')
+                self.membre.update_inscription_terminee()
+                print(self.membre.update_inscription_terminee())
+                self.membre.save()
+
+            # Alimenter le fonds social
+#             if is_new:
+#                 from core.models import FondsSocial
+#                 fonds = FondsSocial.get_fonds_actuel()
+#                 if fonds:
+#                     fonds.ajouter_montant(
+#                         self.montant,
+#                         f"Inscription {self.membre.numero_membre} - Session {self.session.nom}"
+#                     )
+    
     
     def __str__(self):
         return f"{self.membre.numero_membre} - {self.montant:,.0f} FCFA ({self.date_paiement.date()})"
-
+    
 class PaiementSolidarite(models.Model):
     """
     Paiements de solidarité (fonds social) par session
@@ -113,40 +128,48 @@ class PaiementSolidarite(models.Model):
         # unique_together = [['membre', 'session']]
         
     def save(self, *args, **kwargs):
-        is_new = self.pk is None
-        # ✅ LOGIC AMÉLIORÉE: Enregistrer le montant dû au moment du paiement
-        if is_new and not self.montant_solidarite_du:
-            from core.models import ConfigurationMutuelle
-            config = ConfigurationMutuelle.get_configuration()
-            self.montant_solidarite_du = config.montant_solidarite
-            print(f"💰 Solidarité session {self.session.nom}: montant dû = {self.montant_solidarite_du}")
-        super().save(*args, **kwargs)
+        # Sauvegarde et alimentation du fonds social en transaction
+        with transaction.atomic():
+            is_new = getattr(self, '_state', None) and getattr(self._state, 'adding', True)
+            super().save(*args, **kwargs)
+
+            if is_new and self.montant and self.montant > 0:
+                try:
+                    fonds = FondsSocial.get_fonds_actuel()
+                    if fonds:
+                        desc = f"Solidarité {self.membre.numero_membre} - Session {self.session.nom}"
+                        fonds.ajouter_montant(self.montant, description=desc)
+                        print(f"Debug: ajout effectué {self.montant}")
+                    else:
+                        print("Aucun fonds social actuel trouvé pour enregistrer la solidarité.")
+                except Exception as e:
+                    print(f"Erreur lors de l'alimentation du fonds social: {e}")
+                    
+            is_new = self.pk is None
+
+            # ✅ LOGIC AMÉLIORÉE: Enregistrer le montant dû au moment du paiement
+            if is_new and not self.montant_solidarite_du:
+                from core.models import ConfigurationMutuelle
+                config = ConfigurationMutuelle.get_configuration()
+                self.montant_solidarite_du = config.montant_solidarite
+                print(f"💰 Solidarité session {self.session.nom}: montant dû = {self.montant_solidarite_du}")
+
+            # ✅ CORRECTION: Ne mettre à jour le statut que si on peut définir les statuts (≥3 sessions)
+            try:
+                from core.models import Membre
+                peut_definir_statuts = Membre.peut_definir_statuts_membre(membre=self.membre)
+
+                if peut_definir_statuts and self.membre.calculer_statut_en_regle():
+                    self.membre.statut = 'EN_REGLE'
+                    self.membre.save()
+                elif peut_definir_statuts:
+                    # Si on peut définir les statuts mais membre n'est pas en règle
+                    self.membre.statut = 'NON_EN_REGLE'
+                    self.membre.save()
+            except Exception as e:
+                print(f"Erreur de calcul de statut en règle: {e}")
+                pass
         
-        # ✅ CORRECTION: Ne mettre à jour le statut que si on peut définir les statuts (≥3 sessions)
-        try:
-            from core.models import Membre
-            peut_definir_statuts = Membre.peut_definir_statuts_membre(membre=self.membre)
-            
-            if peut_definir_statuts and self.membre.calculer_statut_en_regle():
-                self.membre.statut = 'EN_REGLE'
-                self.membre.save()
-            elif peut_definir_statuts:
-                # Si on peut définir les statuts mais membre n'est pas en règle
-                self.membre.statut = 'NON_EN_REGLE'
-                self.membre.save()
-        except Exception as e:
-            print(f"Erreur de calcul de statut en règle: {e}")
-            pass
-        
-        # Alimenter le fonds social à chaque paiement de solidarité
-        if is_new:
-            from core.models import FondsSocial
-            fonds = FondsSocial.get_fonds_actuel()
-            if fonds:
-                fonds.ajouter_montant(
-                    self.montant,
-                    f"Solidarité {self.membre.numero_membre} - Session {self.session.nom}"
-                )
     
     def __str__(self):
         return f"{self.membre.numero_membre} - Session {self.session.nom} - {self.montant:,.0f} FCFA"
@@ -779,9 +802,40 @@ class PaiementRenflouement(models.Model):
         return f"{self.renflouement.membre.numero_membre} - {self.montant:,.0f} FCFA ({self.date_paiement.date()})"
     
     def save(self, *args, **kwargs):
-        is_new = self.pk is None
-        super().save(*args, **kwargs)
+        # Utiliser un indicateur fiable pour nouvelle instance et une transaction
+        is_new = getattr(self._state, 'adding', True)
+        from django.db import transaction as _transaction
+        from core.models import FondsSocial
+
+        with _transaction.atomic():
+            super().save(*args, **kwargs)
+
+            # Mise à jour du montant payé du renflouement (agrégation sûre)
+            total = self.renflouement.paiements.aggregate(total=Sum('montant'))['total'] or Decimal('0')
+            self.renflouement.montant_paye = total
+            self.renflouement.save()
+
+            try:
+                if self.renflouement.membre.calculer_statut_en_regle():
+                    # Mise à jour atomique
+                    Membre.objects.filter(pk=self.renflouement.membre.pk).update(statut='EN_REGLE')
+            except Exception as e:
+                print(f"Erreur de calcul de statut en règle: {e}")
+
+            # Alimenter le fonds social pour les paiements de renflouement (nouveaux paiements uniquement)
+            if is_new and self.montant and self.montant > 0:
+                try:
+                    fonds = FondsSocial.get_fonds_actuel()
+                    if fonds:
+                        desc = f"Renflouement {self.renflouement.membre.numero_membre} - {self.renflouement.cause}"
+                        fonds.ajouter_montant(self.montant, description=desc)
+                        print(f"Debug: renflouement ajouté {self.montant}")
+                    else:
+                        print("Aucun fonds social actuel trouvé pour renflouement.")
+                except Exception as e:
+                    print(f"Erreur lors de l'alimentation du fonds social (renflouement): {e}")
         
+        is_new = self.pk is None
         # Mise à jour du montant payé du renflouement
         self.renflouement.montant_paye = sum(
             p.montant for p in self.renflouement.paiements.all()
@@ -794,15 +848,4 @@ class PaiementRenflouement(models.Model):
         except :
             print(f"Erreur de calcul de sttus en regle  ")
             pass
-        
-        
-        # CRUCIAL: Alimenter le fonds social avec le paiement de renflouement
-        if is_new:
-            from core.models import FondsSocial
-            fonds = FondsSocial.get_fonds_actuel()
-            if fonds:
-                fonds.ajouter_montant(
-                    self.montant,
-                    f"Renflouement {self.renflouement.membre.numero_membre} - {self.renflouement.cause}"
-                )
-
+                

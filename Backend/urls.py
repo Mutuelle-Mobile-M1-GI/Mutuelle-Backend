@@ -22,6 +22,7 @@ urlpatterns = [
     path('api/core/', include('core.urls')),
     path('api/transactions/', include('transactions.urls')),
     path('api/administration/', include('administration.urls')),
+    #path('api/', include('core.urls')),
 ]
 
 # Servir les fichiers media en développement

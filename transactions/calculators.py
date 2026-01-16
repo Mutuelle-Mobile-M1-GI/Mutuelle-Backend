@@ -1,2 +1,9 @@
-# Calculateurs pour intérêts, renflouement, etc.
+# Calculateurs pour intï¿½rï¿½ts, renflouement, etc.
 
+from django.apps import AppConfig
+
+class TonAppConfig(AppConfig):
+    name = 'core'
+
+    def ready(self):
+        import core.signals  # Charge les signals
