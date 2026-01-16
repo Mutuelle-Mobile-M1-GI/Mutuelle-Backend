@@ -256,15 +256,14 @@ class GestionMembresViewSet(viewsets.ViewSet):
                 membre.save()            
 
             # Mettre à jour le statut du membre si inscription complète
-            config = ConfigurationMutuelle.get_configuration()
             total_paye = PaiementInscription.objects.filter(
                 membre=membre
             ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
             
-            if total_paye >= paiement.montant_inscription_du and membre.statut != 'EN_REGLE':
+            if membre.inscription_terminee:
                 
                 try:
-                    if membre.calculer_statut_en_regle() == "EN_REGLE":
+                    if membre.calculer_statut_en_regle():
                         membre.statut = 'EN_REGLE'
                         membre.save()
                 except e :

@@ -93,32 +93,129 @@ class Exercice(models.Model):
     
     def save(self, *args, **kwargs):
         """
-        Calcule automatiquement la date_fin si elle n'est pas fournie
+        ✅ VERSION ATOMIQUE : Gestion automatique du cycle d'exercice
+        
+        Quand un nouvel exercice EN_COURS est créé:
+        1. Marquer l'exercice EN_COURS précédent comme TERMINE
+        2. Marquer la session EN_COURS comme TERMINEE
+        3. Calculer automatiquement date_fin si nécessaire
+        4. Créer un nouveau FondsSocial avec le même montant que le précédent
+        5. Sauvegarder le nouvel exercice
+        
+        ⚠️ Si n'importe quelle étape échoue, TOUT est annulé (rollback)
         """
+        old_statut = None
+        is_new = self.pk is None
+        
         # ✅ Générer le nom automatiquement si pas fourni
         if not self.nom:
             year = self.date_debut.year if self.date_debut else datetime.now().year
             self.nom = f"Exercice {year}"
         
+        # ✅ Obtenir l'ancien statut SEULEMENT si l'instance existe déjà
+        if not is_new:
+            try:
+                old_instance = Exercice.objects.get(pk=self.pk)
+                old_statut = old_instance.statut
+            except Exercice.DoesNotExist:
+                is_new = True
+                old_statut = None
+        
         # ✅ Calculer date_fin automatiquement si pas fournie
         if self.date_debut and not self.date_fin:
             try:
-                # Récupérer la configuration actuelle
                 config = ConfigurationMutuelle.get_configuration()
                 duree_mois = config.duree_exercice_mois
-                
-                # Calculer date de fin en ajoutant la durée en mois
                 self.date_fin = self.date_debut + relativedelta(months=duree_mois)
-                
                 print(f"✅ Date de fin calculée automatiquement: {self.date_fin} (durée: {duree_mois} mois)")
-                
             except Exception as e:
                 print(f"❌ Erreur calcul date_fin: {e}")
-                # Fallback: ajouter 12 mois par défaut
                 self.date_fin = self.date_debut + relativedelta(months=12)
                 print(f"🔄 Fallback: date_fin = {self.date_fin} (12 mois par défaut)")
         
-        super().save(*args, **kwargs)
+        # 🔒 TRANSACTION ATOMIQUE : Tout réussit ou tout échoue
+        with transaction.atomic():
+            # ✅ SI C'EST UN NOUVEL EXERCICE AVEC STATUT EN_COURS
+            if is_new and self.statut == 'EN_COURS':
+                # 1️⃣ Marquer l'exercice EN_COURS précédent comme TERMINE
+                previous_current_exercice = Exercice.objects.filter(
+                    statut='EN_COURS'
+                ).first()
+                
+                if previous_current_exercice:
+                    previous_current_exercice.statut = 'TERMINE'
+                    previous_current_exercice.save(update_fields=['statut', 'date_modification'])
+                    print(f"📝 Exercice précédent {previous_current_exercice.nom} marqué comme TERMINE")
+                
+                # 2️⃣ Marquer la session EN_COURS comme TERMINEE
+                current_session = Session.objects.filter(statut='EN_COURS').first()
+                if current_session:
+                    current_session.statut = 'TERMINEE'
+                    current_session.save(update_fields=['statut', 'date_modification'])
+                    print(f"📝 Session courante {current_session.nom} marquée comme TERMINEE")
+            
+            # ✅ SAUVEGARDER L'EXERCICE
+            super().save(*args, **kwargs)
+            print(f"✅ Exercice {self.nom} sauvegardé avec statut {self.statut}")
+            
+            # ✅ SI C'EST UN NOUVEL EXERCICE EN_COURS: Réinitialiser statuts des membres
+            if is_new and self.statut == 'EN_COURS':
+                # 3️⃣ Réinitialiser le statut de tous les membres à NON_DEFINI
+                try:
+                    nombre_membres_modifies = Membre.objects.all().update(statut='NON_DEFINI')
+                    print(f"✅ Statuts de {nombre_membres_modifies} membres réinitialisés à 'NON_DEFINI'")
+                except Exception as e:
+                    print(f"❌ ERREUR lors de la réinitialisation des statuts des membres: {e}")
+                    raise ValidationError(
+                        f"❌ IMPOSSIBLE DE RÉINITIALISER LES STATUTS DES MEMBRES\n"
+                        f"   {str(e)}"
+                    )
+            
+            # ✅ SI C'EST UN NOUVEL EXERCICE EN_COURS: Dupliquer le FondsSocial
+            if is_new and self.statut == 'EN_COURS':
+                try:
+                    # 3️⃣ Récupérer le FondsSocial de l'exercice précédent
+                    ancien_fonds = None
+                    if previous_current_exercice:
+                        try:
+                            ancien_fonds = FondsSocial.objects.get(exercice=previous_current_exercice)
+                            montant_a_conserver = ancien_fonds.montant_total
+                        except FondsSocial.DoesNotExist:
+                            montant_a_conserver = Decimal('0')
+                            print(f"⚠️ Aucun FondsSocial trouvé pour {previous_current_exercice.nom}")
+                    else:
+                        montant_a_conserver = Decimal('0')
+                    
+                    # 4️⃣ Créer un nouveau FondsSocial pour le nouvel exercice
+                    nouveau_fonds, created = FondsSocial.objects.get_or_create(
+                        exercice=self,
+                        defaults={
+                            'montant_total': montant_a_conserver
+                        }
+                    )
+                    
+                    if created:
+                        print(f"✅ Nouveau FondsSocial créé pour {self.nom}")
+                        print(f"   Montant conservé: {montant_a_conserver:,.0f} FCFA")
+                        
+                        # 5️⃣ Créer une ligne de mouvement pour tracer le transfert
+                        if ancien_fonds and montant_a_conserver > 0:
+                            MouvementFondsSocial.objects.create(
+                                fonds_social=nouveau_fonds,
+                                type_mouvement='ENTREE',
+                                montant=montant_a_conserver,
+                                description=f"Transfert FondsSocial de {previous_current_exercice.nom} à {self.nom}"
+                            )
+                            print(f"📝 Mouvement FondsSocial enregistré : Transfert de {montant_a_conserver:,.0f} FCFA")
+                    else:
+                        print(f"⚠️ FondsSocial existant pour {self.nom}")
+                        
+                except Exception as e:
+                    print(f"❌ ERREUR lors de la gestion FondsSocial: {e}")
+                    raise ValidationError(
+                        f"❌ IMPOSSIBLE DE CRÉER L'EXERCICE : Erreur FondsSocial\n"
+                        f"   {str(e)}"
+                    )
     
     def __str__(self):
         date_fin_str = self.date_fin.strftime("%Y-%m-%d") if self.date_fin else "Non définie"
@@ -681,31 +778,72 @@ class Membre(models.Model):
         à un membre donné.
 
         Règle :
-        - Le membre doit avoir vécu AU MOINS 2 sessions
-        - Sessions ≥ session d'inscription
+        - Le membre doit avoir vécu AU MOINS 3 sessions (dans l'exercice actuel)
         - Sessions TERMINÉES ou EN_COURS
+        
+        ✅ LOGIQUE CORRIGÉE :
+        - Si le membre s'est inscrit dans l'exercice EN_COURS : 
+          → Compter depuis sa session d'inscription
+        - Si le membre s'est inscrit dans un exercice TERMINE :
+          → Compter UNIQUEMENT les sessions du nouvel exercice EN_COURS
+          → (car son statut a été réinitialisé au changement d'exercice)
         """
-        from core.models import Session
+        from core.models import Session, Exercice
 
-        sessions_membre = Session.objects.filter(
-            date_session__gte=membre.session_inscription.date_session,
-            statut__in=['TERMINEE', 'EN_COURS']
-        ).order_by('date_session')
-
-        nombre_sessions = sessions_membre.count()
-
-        if nombre_sessions > 2:
-            print(
-                f"✅ Membre {membre.numero_membre} : "
-                f"{nombre_sessions} sessions → Statut définissable"
-            )
-            return True
-        else:
-            print(
-                f"⏳ Membre {membre.numero_membre} : "
-                f"{nombre_sessions} session(s) → Statut NON définissable"
-            )
+        # Récupérer l'exercice en cours
+        exercice_actuel = Exercice.get_exercice_en_cours()
+        if not exercice_actuel:
+            print(f"⏳ Membre {membre.numero_membre} : Pas d'exercice EN_COURS")
             return False
+
+        # 🔄 LOGIQUE : Le membre a-t-il la même date d'inscription que l'exercice actuel ?
+        # (i.e., s'est-il inscrit dans l'exercice EN_COURS ?)
+        if membre.exercice_inscription == exercice_actuel:
+            # ✅ CAS 1: Le membre s'est inscrit dans l'exercice EN_COURS
+            # → Compter depuis sa session d'inscription (logique originale)
+            sessions_membre = Session.objects.filter(
+                exercice=exercice_actuel,
+                date_session__gte=membre.session_inscription.date_session,
+                statut__in=['TERMINEE', 'EN_COURS']
+            ).order_by('date_session')
+            
+            nombre_sessions = sessions_membre.count()
+            
+            if nombre_sessions >= 3:
+                print(
+                    f"✅ Membre {membre.numero_membre} (inscrit cet exercice) : "
+                    f"{nombre_sessions} sessions → Statut définissable"
+                )
+                return True
+            else:
+                print(
+                    f"⏳ Membre {membre.numero_membre} (inscrit cet exercice) : "
+                    f"{nombre_sessions} session(s) → Statut NON définissable"
+                )
+                return False
+        else:
+            # ✅ CAS 2: Le membre s'est inscrit dans un exercice ANTÉRIEUR
+            # → Compter UNIQUEMENT les sessions de l'exercice EN_COURS
+            # (car son statut a été réinitialisé au changement d'exercice)
+            sessions_membre = Session.objects.filter(
+                exercice=exercice_actuel,
+                statut__in=['TERMINEE', 'EN_COURS']
+            ).order_by('date_session')
+            
+            nombre_sessions = sessions_membre.count()
+            
+            if nombre_sessions >= 3:
+                print(
+                    f"✅ Membre {membre.numero_membre} (ancien) : "
+                    f"{nombre_sessions} sessions du nouvel exercice → Statut définissable"
+                )
+                return True
+            else:
+                print(
+                    f"⏳ Membre {membre.numero_membre} (ancien) : "
+                    f"{nombre_sessions} session(s) du nouvel exercice → Statut NON définissable"
+                )
+                return False
 
 
 

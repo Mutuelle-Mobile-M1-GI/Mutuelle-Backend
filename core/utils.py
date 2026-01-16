@@ -151,7 +151,6 @@ def calculer_donnees_membre_completes(membre):
     
     total_solidarite_payee = PaiementSolidarite.objects.filter(
         membre=membre,
-        session__in=sessions_depuis_inscription
     ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
     
     solidarite_data.update({
