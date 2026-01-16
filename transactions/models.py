@@ -402,15 +402,21 @@ class Emprunt(models.Model):
             
             # 🔧 ÉTAPE 9: Mise à jour du statut du membre (En règle ou non)
             try:
-                if self.membre.calculer_statut_en_regle():
+                from core.models import Membre
+                peut_definir_statuts = Membre.peut_definir_statuts_membre(membre=self.membre)
+                
+                if peut_definir_statuts and self.membre.calculer_statut_en_regle():
+                    print("SAUVEGARDE DE L'EMPRUNT ON VA VOIR SI IL EST EN REGLE ET IL L'EST ")
                     self.membre.statut = 'EN_REGLE'
-                else:
+                    self.membre.save()
+                elif peut_definir_statuts:
+                    print("SAUVEGARDE DE L'EMPRUNT ON VA VOIR SI IL EST EN REGLE ET NE L'EST PAS DU TOUT ! ")
                     self.membre.statut = 'NON_EN_REGLE'
-                self.membre.save(update_fields=['statut'])
-                print(f"   👤 Statut membre mis à jour : {self.membre.statut}")
+                    self.membre.save()
             except Exception as e:
-                print(f"   ⚠️ Erreur calcul statut membre : {e}")
-
+                print(f"Erreur de calcul de statut en règle: {e}")
+                pass
+                
             print(f"   ✅ EMPRUNT SAUVÉ AVEC SUCCÈS")
 
         except Exception as e:
