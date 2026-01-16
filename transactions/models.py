@@ -3,7 +3,7 @@ from django.core.validators import MinValueValidator
 from django.conf import settings
 from decimal import Decimal, ROUND_HALF_UP
 import uuid
-from core.models import Membre, Session, Exercice, TypeAssistance
+from core.models import Membre, Session, Exercice, TypeAssistance,Interet
 from decimal import Decimal, ROUND_HALF_UP
 from django.db.models import Sum, Q
 from django.utils import timezone
@@ -241,11 +241,7 @@ class Emprunt(models.Model):
         return None
     
     def _calculer_montant_total_auto(self):
-        """Calcule automatiquement le montant total à rembourser"""
-        if self.montant_emprunte and self.taux_interet:
-            interet = (self.montant_emprunte * self.taux_interet) / 100
-            return self.montant_emprunte + interet
-        return self.montant_emprunte or 0
+        return self.montant_emprunte 
     
     def _determiner_statut_auto(self):
         """Détermine automatiquement le statut basé sur les remboursements et dates"""
@@ -273,86 +269,78 @@ class Emprunt(models.Model):
         return nouveau_statut
     
     def save(self, *args, **kwargs):
-        """Sauvegarde avec calculs automatiques et vérifications de sécurité"""
+        """Sauvegarde avec escompte : le membre reçoit le net et doit le nominal."""
         print(f"🔍 SAVE EMPRUNT - Début pour {getattr(self, 'id', 'NOUVEAU')}")
         
         try:
-            # 🔧 ÉTAPE 1: Calcul automatique du montant total si manquant
-            if not self.montant_total_a_rembourser:
-                ancien_montant = self.montant_total_a_rembourser
-                self.montant_total_a_rembourser = self._calculer_montant_total_auto()
-                print(f"   ✅ Montant total calculé: {ancien_montant} -> {self.montant_total_a_rembourser}")
+            # On vérifie si c'est une création AVANT de modifier les montants
+            is_new = self._state.adding 
             
-            # 🔧 ÉTAPE 2: Sécurité - S'assurer que date_emprunt existe avant calculs
+            if is_new:
+                # --- LOGIQUE D'ESCOMPTE ---
+                # On part du montant envoyé par le frontend (ex: 100 000)
+                nominal_demande = self.montant_emprunte 
+                
+                # Calcul de la retenue (3% de 100 000 = 3 000)
+                interet_retenu = (nominal_demande * self.taux_interet) / Decimal('100')
+                
+                # MISE À JOUR DES CHAMPS :
+                # 1. La dette totale est le montant nominal (100 000)
+                self.montant_total_a_rembourser = nominal_demande
+                
+                # 2. Le montant "emprunté" devient le net décaissé (97 000)
+                # C'est ce montant qui impactera la caisse/épargne
+                self.montant_emprunte = nominal_demande - interet_retenu
+                
+                print(f"   ✅ Application Escompte : Nominal {nominal_demande} | Net décaissé {self.montant_emprunte} | Intérêt {interet_retenu}")
+
+            # 🔧 ÉTAPE 2: Sécurité - Date d'emprunt
             if not self.date_emprunt:
                 self.date_emprunt = timezone.now()
-                print(f"   ✅ Date emprunt auto-assignée: {self.date_emprunt}")
             
-            # 🔧 ÉTAPE 3: Calcul automatique de la date max de remboursement si manquante
+            # 🔧 ÉTAPE 3: Calcul de l'échéance (2 mois par défaut)
             if not self.date_remboursement_max:
-                ancienne_date = self.date_remboursement_max
                 self.date_remboursement_max = self._calculer_date_remboursement_max_auto()
-                print(f"   ✅ Date max remboursement calculée: {ancienne_date} -> {self.date_remboursement_max}")
             
-            # 🔧 ÉTAPE 4: Vérification de sécurité des montants
+            # 🔧 ÉTAPE 4: Sécurité des remboursements
             if self.montant_rembourse < 0:
-                print(f"   ⚠️ Correction montant remboursé négatif: {self.montant_rembourse} -> 0")
                 self.montant_rembourse = 0
             
-            if self.montant_rembourse > self.montant_total_a_rembourser:
-                print(f"   ⚠️ Montant remboursé supérieur au total: {self.montant_rembourse} > {self.montant_total_a_rembourser}")
-                # On peut soit le plafonner, soit laisser (surpaiement)
-                # self.montant_rembourse = self.montant_total_a_rembourser
+            # 🔧 ÉTAPE 5: Détermination du statut (EN_COURS, REMBOURSE, etc.)
+            self.statut = self._determiner_statut_auto()
             
-            # 🔧 ÉTAPE 5: Détermination automatique du statut
-            ancien_statut = self.statut
-            nouveau_statut = self._determiner_statut_auto()
-            
-            if ancien_statut != nouveau_statut:
-                print(f"   🔄 Changement de statut: {ancien_statut} -> {nouveau_statut}")
-                self.statut = nouveau_statut
-            
-            # 🔧 ÉTAPE 6: Validation finale avant sauvegarde
+            # 🔧 ÉTAPE 6: Validations de sécurité
             if self.montant_emprunte <= 0:
-                raise ValueError(f"Montant emprunté invalide: {self.montant_emprunte}")
-            
-            if self.taux_interet < 0:
-                raise ValueError(f"Taux d'intérêt invalide: {self.taux_interet}")
-            
-            # 🔧 ÉTAPE 7: Sauvegarde effective
-            print(f"   💾 Sauvegarde en cours...")
+                raise ValueError(f"Montant décaissé invalide: {self.montant_emprunte}")
+
+            # 🔧 ÉTAPE 7: Sauvegarde réelle en base de données
+            print(f"   💾 Sauvegarde en base de données...")
             super().save(*args, **kwargs)
             
-            print(f"   ✅ EMPRUNT SAUVÉ AVEC SUCCÈS:")
-            print(f"      - ID: {self.id}")
-            print(f"      - Membre: {self.membre.numero_membre if self.membre else 'N/A'}")
-            print(f"      - Montant emprunté: {self.montant_emprunte}")
-            print(f"      - Montant total: {self.montant_total_a_rembourser}")
-            print(f"      - Montant remboursé: {self.montant_rembourse}")
-            print(f"      - Date emprunt: {self.date_emprunt}")
-            print(f"      - Date max remboursement: {self.date_remboursement_max}")
-            print(f"      - Statut: {self.statut}")
-            print(f"      - En retard: {self.is_en_retard}")
+            # 🚀 ÉTAPE 8: Redistribution des intérêts (Seulement à la création)
+            if is_new:
+                print(f"   💰 Lancement de la redistribution des intérêts...")
+                self.distribuer_interets_precomptes()
             
+            # 🔧 ÉTAPE 9: Mise à jour du statut du membre (En règle ou non)
             try:
-                if self.membre.calculer_statut_en_regle() :
-                    print("SAUVEGARDE DE L'EMPRUNT ON VA VOIR SI IL EST EN REGLE ET IL L'EST ")
+                if self.membre.calculer_statut_en_regle():
                     self.membre.statut = 'EN_REGLE'
-                    self.membre.save()
                 else:
-                    print("SAUVEGARDE DE L'EMPRUNT ON VA VOIR SI IL EST EN REGLE ET NE L'EST PAS DU TOUT ! ")
                     self.membre.statut = 'NON_EN_REGLE'
-                    self.membre.save()
-            except :
-                print(f"Erreur de calcul de sttus en regle  ")
-                pass
+                self.membre.save(update_fields=['statut'])
+                print(f"   👤 Statut membre mis à jour : {self.membre.statut}")
+            except Exception as e:
+                print(f"   ⚠️ Erreur calcul statut membre : {e}")
+
+            print(f"   ✅ EMPRUNT SAUVÉ AVEC SUCCÈS")
+
         except Exception as e:
             print(f"   ❌ ERREUR LORS DE LA SAUVEGARDE: {e}")
-            print(f"   ❌ Type d'erreur: {type(e)}")
             import traceback
             print(f"   ❌ Traceback: {traceback.format_exc()}")
             raise
-    
+        
     @classmethod
     def verifier_retards_globaux(cls):
         """Méthode utilitaire pour vérifier tous les emprunts en retard"""
@@ -392,8 +380,58 @@ class Emprunt(models.Model):
                 raise ValidationError({
                     'date_remboursement_max': 'La date de remboursement maximale doit être postérieure à la date d\'emprunt'
                 })
+    def distribuer_interets_precomptes(self):
+    
+        from django.db import transaction
+        from core.models import Interet
+    # On importe EpargneTransaction ici pour éviter les imports circulaires
+        from transactions.models import EpargneTransaction
+    
+    # 1. Calcul de la cagnotte par différence (Dette 100k - Net 97k = 3000)
+    # C'est plus précis que de refaire le calcul du pourcentage
+        cagnotte = self.montant_total_a_rembourser - self.montant_emprunte
+    
+        if cagnotte <= 0:
+            return
 
-
+    # 2. Obtenir l'épargne globale
+        total_global = Decimal('0')
+        epargnes_membres = []
+    
+        tous_membres = Membre.objects.all()
+        for m in tous_membres:
+            e = m.calculer_epargne_pure()
+            if e > 0:
+                total_global += e
+                epargnes_membres.append({'membre': m, 'montant': e})
+    
+        if total_global > 0:
+            with transaction.atomic():
+                for item in epargnes_membres:
+                # Calcul au prorata
+                    part = (item['montant'] / total_global) * cagnotte
+                    part = part.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+                
+                    if part > 0:
+                    # A. Création dans la table Interet (Historique des gains)
+                        Interet.objects.create(
+                            membre=item['membre'],
+                            emprunt_source=self,
+                            exercice=self.session_emprunt.exercice,
+                            session=self.session_emprunt,
+                            montant=part
+                        )
+                    
+                    # B. Création dans EpargneTransaction (Flux financier réel)
+                    # C'est cette ligne qui sera lue par calculer_epargne_pure
+                        EpargneTransaction.objects.create(
+                            membre=item['membre'],
+                            type_transaction='AJOUT_INTERET',
+                            montant=part, # Montant positif
+                            session=self.session_emprunt,
+                            notes=f"Intérêt perçu sur prêt de {self.membre.numero_membre}"
+                        )
+                print(f"✅ Redistribution de {cagnotte:,.0f} FCFA et mise à jour des épargnes terminées.")
 
 
 class Remboursement(models.Model):
@@ -469,41 +507,7 @@ class Remboursement(models.Model):
             self.montant_capital = capital_restant
             self.montant_interet = self.montant - capital_restant
     
-    def _redistribuer_interets(self):
-        """Redistribue les intérêts proportionnellement aux épargnes"""
-        if self.montant_interet <= 0:
-            return
-        
-        # Calculer le total des épargnes de tous les membres
-        total_epargnes = Decimal('0')
-        membres_epargnes = {}
-        
-        for membre in Membre.objects.filter(statut='EN_REGLE'):
-            epargne_membre = membre.calculer_epargne_totale()
-            if epargne_membre > 0:
-                membres_epargnes[membre] = epargne_membre
-                total_epargnes += epargne_membre
-        
-        if total_epargnes == 0:
-            return
-        
-        # Redistribuer proportionnellement
-        for membre, epargne_membre in membres_epargnes.items():
-            pourcentage = epargne_membre / total_epargnes
-            interet_membre = (self.montant_interet * pourcentage).quantize(
-                Decimal('0.01'), rounding=ROUND_HALF_UP
-            )
-            
-            # Créer la transaction d'épargne pour l'intérêt
-            EpargneTransaction.objects.create(
-                membre=membre,
-                type_transaction='AJOUT_INTERET',
-                montant=interet_membre,
-                session=self.session,
-                notes=f"Intérêt redistributed from emprunt {self.emprunt.id}"
-            )
-            
-            print(f"Intérêt redistributed: {membre.numero_membre} - {interet_membre} FCFA")
+    
 
 class AssistanceAccordee(models.Model):
     """
@@ -743,3 +747,4 @@ class PaiementRenflouement(models.Model):
                     self.montant,
                     f"Renflouement {self.renflouement.membre.numero_membre} - {self.renflouement.cause}"
                 )
+

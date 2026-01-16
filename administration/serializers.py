@@ -114,3 +114,25 @@ class CreerMembreCompletSerializer(serializers.Serializer):
             print("Un utilisateur avec ce nom d'utilisateur existe déjà")
             raise serializers.ValidationError("Un utilisateur avec ce nom d'utilisateur existe déjà")
         return value
+    
+    # administration/serializers.py
+
+# administration/serializers.py
+
+from rest_framework import serializers
+from core.models import EmpruntCoefficientTier, Exercice # ✅ Ajoute Exercice à l'import
+
+class EmpruntCoefficientTierSerializer(serializers.ModelSerializer):
+    # On définit explicitement le champ exercise pour accepter l'UUID envoyé par le mobile
+    exercise = serializers.PrimaryKeyRelatedField(queryset=Exercice.objects.all())
+
+    class Meta:
+        model = EmpruntCoefficientTier
+        fields = [
+            'id', 
+            'exercise',    # ✅ Doit être identique au nom dans core/models.py
+            'min_amount', 
+            'max_amount', 
+            'coefficient', 
+            'max_cap'
+        ]
