@@ -232,29 +232,44 @@ class GestionMembresViewSet(viewsets.ViewSet):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
+            # On recupere le montant que devait payer le membre a partir du premier paiement
+            premier_paiement = PaiementInscription.objects.filter(
+                membre=membre
+            ).order_by('date_paiement').first()
+
+            if premier_paiement:
+                montant_inscription_du = premier_paiement.montant_inscription_du
+            else:
+                # Utiliser la config par défaut si pas encore payé
+                montant_inscription_du = ConfigurationMutuelle.get_configuration().montant_inscription            
+            print(f"📝 Paiement suivant: montant dû = {montant_inscription_du}")
             paiement = PaiementInscription.objects.create(
                 membre=membre,
                 montant=serializer.validated_data['montant'],
                 session=session,
-                notes=serializer.validated_data.get('notes', '')
+                notes=serializer.validated_data.get('notes', ''),
+                montant_inscription_du=montant_inscription_du
             )
-            
+            #Mettre a jour inscription_terminee
+            if membre.update_inscription_terminee() :
+                #print("%%%%%%%%%%%%%%%%Inscription termiee pour le membre")
+                membre.save()            
+
             # Mettre à jour le statut du membre si inscription complète
-            config = ConfigurationMutuelle.get_configuration()
             total_paye = PaiementInscription.objects.filter(
                 membre=membre
             ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
             
-            if total_paye >= config.montant_inscription and membre.statut != 'EN_REGLE':
+            if membre.inscription_terminee:
                 
                 try:
-                    if membre.calculer_statut_en_regle() :
+                    if membre.calculer_statut_en_regle():
                         membre.statut = 'EN_REGLE'
                         membre.save()
                 except e :
-                    print(f"Erreur de calcul de sttus en regle : {e} ")
+                    print(f"Erreur de calcul de statut en regle : {e} ")
                     pass
-                print("MEMEBRE EN REGLE POUR INSCRIPTION")
+                print("MEMBRE EN REGLE POUR INSCRIPTION")
             
             return Response({
                 'message': 'Paiement inscription ajouté avec succès',
@@ -501,13 +516,18 @@ class GestionMembresViewSet(viewsets.ViewSet):
                     'error': error_msg
                 }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-            # 🔧 ÉTAPE 7: Création de l'emprunt avec transaction
+            # 🔧 ÉTAPE 7: Création de l'emprunt avec transaction (Logique Escompte)
             print("🔍 ÉTAPE 7: Création de l'emprunt et transaction épargne")
             notes = serializer.validated_data.get('notes', '')
             try:
                 from django.db import transaction as db_transaction
                 with db_transaction.atomic():
                     print("🔍 Début transaction DB...")
+                    
+                    # 1. Création de l'objet Emprunt
+                    # Le frontend envoie 100 000 (montant_decimal)
+                    # Le save() du modèle va stocker 97 000 dans montant_emprunte
+                    # et 100 000 dans montant_total_a_rembourser
                     emprunt = Emprunt.objects.create(
                         membre=membre,
                         montant_emprunte=montant_decimal,
@@ -515,49 +535,59 @@ class GestionMembresViewSet(viewsets.ViewSet):
                         session_emprunt=session,
                         notes=notes
                     )
-                    print(f"✅ Emprunt créé: {emprunt.id} pour {emprunt.montant_emprunte} F à {emprunt.taux_interet}%")
-                    # Créer la transaction d'épargne (retrait pour prêt)
+                    
+                    # Important : On récupère la valeur après le calcul du modèle (97 000)
+                    montant_net_decaisse = emprunt.montant_emprunte
+                    
+                    print(f"✅ Emprunt créé: {emprunt.id}")
+                    print(f"✅ Dette stockée (Nominal): {emprunt.montant_total_a_rembourser}")
+                    print(f"✅ Cash sorti (Net): {montant_net_decaisse}")
+
+                    # 2. Créer la transaction d'épargne avec le montant RÉELLEMENT décaissé
+                    # On utilise le signe NEGATIF (-) devant les 97 000
                     EpargneTransaction.objects.create(
                         membre=membre,
                         type_transaction='RETRAIT_PRET',
-                        montant=-montant_decimal,  # Négatif car c'est un retrait
+                        montant=-montant_net_decaisse,  
                         session=session,
-                        notes=f"Retrait pour emprunt {emprunt.id}"
+                        notes=f"Retrait pour prêt {emprunt.id} (Net décaissé)"
                     )
-                    print(f"✅ Transaction épargne créée pour emprunt {emprunt.id}")
+                    
+                    print(f"✅ Transaction épargne de -{montant_net_decaisse} FCFA créée")
+
+                    # 3. Préparer la réponse
                     emprunt.refresh_from_db()
                     response_data = {
                         'message': 'Emprunt créé avec succès',
                         'emprunt_id': str(emprunt.id),
-                        'montant_emprunte': float(emprunt.montant_emprunte),
-                        'montant_a_rembourser': float(getattr(emprunt, 'montant_total_a_rembourser', 0)),
+                        'montant_de_votre_poche': float(emprunt.montant_emprunte), # 97 000
+                        'montant_a_rembourser_plus_tard': float(emprunt.montant_total_a_rembourser), # 100 000
+                        'interets_retenus': float(emprunt.montant_total_a_rembourser - emprunt.montant_emprunte), # 3 000
                         'taux_interet': float(emprunt.taux_interet)
                     }
+                    
                     print(f"✅ Données de réponse: {response_data}")
                     print("=" * 100)
                     return Response(response_data, status=status.HTTP_201_CREATED)
+
             except Exception as e:
                 print(f"❌ EXCEPTION LORS DE LA CRÉATION: {str(e)}")
-                print(f"❌ TYPE D'EXCEPTION: {type(e)}")
                 import traceback
                 print(f"❌ TRACEBACK COMPLET:\n{traceback.format_exc()}")
                 print("=" * 100)
                 return Response({
                     'error': 'Erreur lors de la création de l\'emprunt',
-                    'details': str(e),
-                    'type': str(type(e))
+                    'details': str(e)
                 }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         except Exception as e:
             print(f"❌ EXCEPTION GÉNÉRALE: {str(e)}")
-            print(f"❌ TYPE D'EXCEPTION: {type(e)}")
             import traceback
             print(f"❌ TRACEBACK COMPLET:\n{traceback.format_exc()}")
             print("=" * 100)
             return Response({
                 'error': 'Erreur interne du serveur',
-                'details': str(e),
-                'type': str(type(e))
+                'details': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
 
@@ -846,12 +876,9 @@ class GestionMembresViewSet(viewsets.ViewSet):
         """
         Créer un membre complet (utilisateur + membre) en une seule fois
         """
-        print("*****************REQUETE DE CREATION DE MEMEBRE***************************")
+        print("*****************REQUETE DE CREATION DE MEMBRE***************************")
         print(request.data)
         print("****************************************************************************")
-        
-        
-        
         
         try:
             serializer = CreerMembreCompletSerializer(data=request.data)
@@ -909,24 +936,39 @@ class GestionMembresViewSet(viewsets.ViewSet):
                     date_inscription=serializer.validated_data.get('date_inscription', timezone.now().date()),
                     exercice_inscription=exercice_actuel,
                     session_inscription=session_actuelle,
-                    statut='NON_EN_REGLE'  # Par défaut
+                    statut = 'NON_DEFINI'  # Par défaut
                 )
                 
                 # 3. Optionnel : ajouter un paiement d'inscription initial
                 montant_initial = serializer.validated_data.get('montant_inscription_initial')
                 if montant_initial and montant_initial > 0:
+                    config = ConfigurationMutuelle.get_configuration()
                     PaiementInscription.objects.create(
                         membre=membre,
                         montant=montant_initial,
                         session=session_actuelle,
-                        notes="Paiement initial lors de la création"
+                        notes="Paiement initial lors de la création",
+                        montant_inscription_du = config.montant_inscription
                     )
+
+                    #Apres avoir enregistre le paiement, on met a jour inscription_terminee
+                    print('%%%%%%%%%%%mise a jour de insctiption_termine')
+                    membre.update_inscription_terminee()
+                    print(membre.update_inscription_terminee())
+                    membre.save()
                     
-                    # Vérifier si inscription complète
-                    config = ConfigurationMutuelle.get_configuration()
-                    if montant_initial >= config.montant_inscription:
+                    # ✅ CORRECTION: Déterminer le statut selon la même logique que core/utils.py
+                    # Un membre ne peut passer "EN_REGLE" que si le nombre de sessions >= 3
+                    peut_definir_statuts = Membre.peut_definir_statuts_membre(membre)
+                    
+                    if peut_definir_statuts and montant_initial >= config.montant_inscription:
+                        # Les statuts peuvent être définis ET inscription complète
                         membre.statut = 'EN_REGLE'
-                        membre.save()
+                    else:
+                        # Avant 3 sessions ou inscription incomplète -> statut NON_DEFINI
+                        membre.statut = 'NON_DEFINI'
+                    
+                    membre.save()
                 
                 return Response({
                     'message': 'Membre créé avec succès',
@@ -1057,5 +1099,27 @@ class RapportsViewSet(viewsets.ViewSet):
         if total_du == 0:
             return 100
         return float((total_paye / total_du) * 100)
+    
+    # administration/views.py
+
+from rest_framework import viewsets, permissions
+from core.models import EmpruntCoefficientTier # Vérifie que c'est bien ce nom dans models.py
+from .serializers import EmpruntCoefficientTierSerializer
+
+class EmpruntCoefficientTierViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet pour gérer les tranches de coefficients d'emprunt.
+    """
+    queryset = EmpruntCoefficientTier.objects.all()
+    serializer_class = EmpruntCoefficientTierSerializer
+    permission_classes = [permissions.IsAuthenticated] # Optionnel: restreindre aux admin plus tard
+
+    # Filtrage optionnel : pour ne récupérer que les tranches d'un exercice précis
+    def get_queryset(self):
+        queryset = EmpruntCoefficientTier.objects.all()
+        exercice_id = self.request.query_params.get('exercice', None)
+        if exercice_id is not None:
+            queryset = queryset.filter(exercice_id=exercice_id)
+        return queryset
     
     
