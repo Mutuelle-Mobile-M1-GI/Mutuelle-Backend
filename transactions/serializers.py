@@ -69,6 +69,7 @@ class EmpruntSerializer(serializers.ModelSerializer):
     montant_restant_a_rembourser = serializers.ReadOnlyField()
     montant_interets = serializers.ReadOnlyField()
     pourcentage_rembourse = serializers.ReadOnlyField()
+    montant_net_a_verser = serializers.SerializerMethodField()
     
     # Nouveaux champs calculés
     is_en_retard = serializers.ReadOnlyField()
@@ -81,7 +82,7 @@ class EmpruntSerializer(serializers.ModelSerializer):
     class Meta:
         model = Emprunt
         fields = [
-            'id', 'membre', 'membre_info', 'montant_emprunte', 'taux_interet',
+            'id', 'membre', 'membre_info', 'montant_emprunte', 'taux_interet','montant_net_a_verser',
             'montant_total_a_rembourser', 'montant_rembourse', 'montant_restant_a_rembourser',
             'montant_interets', 'pourcentage_rembourse', 'session_emprunt', 'session_nom',
             'date_emprunt', 'statut', 'statut_display', 'notes', 'remboursements_details','is_en_retard', 'jours_de_retard', 'jours_restants'
@@ -95,6 +96,13 @@ class EmpruntSerializer(serializers.ModelSerializer):
             'date_remboursement_max': {'required': False},  # 🔧 AJOUTÉ
 
         }
+    
+    def get_montant_net_a_verser(self, obj):
+        """Calcule ce que le membre reçoit réellement en main propre"""
+        if obj.montant_emprunte and obj.taux_interet:
+            interets = (obj.montant_emprunte * obj.taux_interet) / Decimal('100')
+            return obj.montant_emprunte - interets
+        return obj.montant_emprunte
     
     def validate_montant_emprunte(self, value):
         """Validation du montant d'emprunt"""
@@ -125,11 +133,15 @@ class EmpruntSerializer(serializers.ModelSerializer):
         return value
     
     def validate(self, data):
-        """Validation croisée"""
-        print(f"🔍 VALIDATION CROISÉE: {data}")
-        
+        """Validation croisée : Vérification du coefficient d'épargne"""
         membre = data.get('membre')
-        montant = data.get('montant_emprunte')
+        montant_demande = data.get('montant_emprunte')
+        
+        if membre and montant_demande:
+            # Utilise la méthode qu'on a mise dans le modèle Membre précédemment
+            peut_emprunter, message = membre.peut_emprunter(montant_demande)
+            if not peut_emprunter:
+                raise serializers.ValidationError({"montant_emprunte": message})
         
         return data
     
