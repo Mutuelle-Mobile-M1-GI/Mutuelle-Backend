@@ -6,3 +6,4 @@ djangorestframework-simplejwt
 pillow
 python-decouple
 whitenoise
+python-dateutil
