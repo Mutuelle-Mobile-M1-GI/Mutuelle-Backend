@@ -6,12 +6,12 @@ from django_filters import rest_framework as filters
 from django.db import models
 from .models import (
     ConfigurationMutuelle, Exercice, Session, TypeAssistance, 
-    Membre, FondsSocial
+    Membre, FondsSocial, EmpruntCoefficientTier
 )
 from .serializers import (
     ConfigurationMutuelleSerializer, ExerciceSerializer, SessionSerializer,
     TypeAssistanceSerializer, MembreSerializer, FondsSocialSerializer,
-    DonneesAdministrateurSerializer
+    DonneesAdministrateurSerializer,EmpruntCoefficientTierSerializer
 )
 from .utils import calculer_donnees_administrateur
 from authentication.permissions import IsAdministrateur, IsAdminOrReadOnly
@@ -33,7 +33,6 @@ class ConfigurationMutuelleFilter(filters.FilterSet):
             'montant_inscription': ['exact', 'gte', 'lte'],
             'montant_solidarite': ['exact', 'gte', 'lte'],
             'taux_interet': ['exact', 'gte', 'lte'],
-            'coefficient_emprunt_max': ['exact', 'gte', 'lte'],
             'duree_exercice_mois': ['exact', 'gte', 'lte'],
         }
 
@@ -199,6 +198,51 @@ class SessionViewSet(viewsets.ModelViewSet):
     ordering_fields = ['date_session', 'date_creation', 'nom', 'montant_collation']
     ordering = ['-date_session']
     permission_classes = [IsAdminOrReadOnly]
+    
+    def perform_create(self, serializer):
+        """
+        Personnalisé : appelé APRÈS la validation, AVANT la sauvegarde lors d'un POST
+        
+        Respecte la logique complète de Session.save() du modèle :
+        1. Auto-génère le nom si pas fourni
+        2. Assigne l'exercice en cours si pas fourni
+        3. Gère les sessions EN_COURS (une seule par exercice)
+        4. Traite la collation si montant > 0 et statut = EN_COURS
+        """
+        print("=" * 100)
+        print("🔍 CRÉATION DE SESSION - perform_create()")
+        print(f"📡 Données reçues: {serializer.validated_data}")
+        print("=" * 50)
+        
+        # Vérifier que l'exercice est assigné
+        if 'exercice' not in serializer.validated_data or not serializer.validated_data.get('exercice'):
+            exercice_actuel = Exercice.get_exercice_en_cours()
+            if exercice_actuel:
+                serializer.validated_data['exercice'] = exercice_actuel
+                print(f"✅ Exercice auto-assigné: {exercice_actuel.nom}")
+            else:
+                print("⚠️ ATTENTION: Aucun exercice en cours trouvé")
+        
+        # Laisser le modèle.save() gérer toute la logique métier
+        # (nom auto-généré, gestion sessions EN_COURS, collation, renflouements, etc.)
+        print("✅ Appel de serializer.save() → Session.save() du modèle prendra le relais")
+        try:
+            serializer.save()
+            
+            print(f"✅ Session créée avec succès:")
+            print(f"   - Nom: {serializer.instance.nom}")
+            print(f"   - Exercice: {serializer.instance.exercice.nom}")
+            print(f"   - Statut: {serializer.instance.statut}")
+            print(f"   - Collation: {serializer.instance.montant_collation}")
+            print("=" * 100)
+        except Exception as e:
+            print(f"❌ ERREUR CRÉATION SESSION: {e}")
+            print("=" * 100)
+            # ✅ Relancer l'exception pour que DRF la gère correctement
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({
+                'detail': str(e)
+            })
     
     @action(detail=False, methods=['get'], permission_classes=[AllowAny])
     def current(self, request):
@@ -422,3 +466,62 @@ def donnees_administrateur(request):
     donnees = calculer_donnees_administrateur()
     serializer = DonneesAdministrateurSerializer(donnees)
     return Response(serializer.data)
+
+class EmpruntCoefficientTierViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet pour gérer les tranches de coefficient d'emprunt par exercice
+    """
+    queryset = EmpruntCoefficientTier.objects.select_related('exercise').all()
+    serializer_class = EmpruntCoefficientTierSerializer
+    permission_classes = [IsAdminOrReadOnly]  # Admin seulement pour modifier
+
+    def get_queryset(self):
+        """
+        Par défaut : ne retourne que les tranches de l'exercice en cours
+        Avec ?exercise_id=xxx → retourne celles de cet exercice
+        """
+        exercise_id = self.request.query_params.get('exercise_id')
+        if exercise_id:
+            return self.queryset.filter(exercise_id=exercise_id).order_by('min_amount')
+        
+        # Par défaut → exercice en cours
+        exercice = Exercice.get_exercice_en_cours()
+        if exercice:
+            return self.queryset.filter(exercise=exercice).order_by('min_amount')
+        return self.queryset.none()
+
+    @action(detail=False, methods=['post'], url_path='bulk-upsert')
+    def bulk_upsert(self, request):
+        """
+        Remplace TOUTES les tranches d'un exercice donné
+        Utilisé lors de la création d'un nouvel exercice avec copie/modification
+        Body:
+        {
+            "exercise_id": "uuid-de-lexercice",
+            "tiers": [
+                { "min_amount": 0, "max_amount": 500000, "coefficient": "6.00", "max_cap": 2500000 },
+                ...
+            ]
+        }
+        """
+        exercise_id = request.data.get('exercise_id')
+        tiers_data = request.data.get('tiers', [])
+
+        if not exercise_id:
+            return Response({"detail": "exercise_id est requis"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not isinstance(tiers_data, list) or len(tiers_data) == 0:
+            return Response({"detail": "Le champ 'tiers' doit être une liste non vide"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Suppression des anciennes tranches
+        deleted_count, _ = EmpruntCoefficientTier.objects.filter(exercise_id=exercise_id).delete()
+
+        # Création des nouvelles
+        serializer = self.get_serializer(data=tiers_data, many=True)
+        serializer.is_valid(raise_exception=True)
+        instances = serializer.save(exercise_id=exercise_id)
+
+        return Response({
+            "detail": f"{len(instances)} tranches créées (supprimées: {deleted_count})",
+            "tiers": serializer.data
+        }, status=status.HTTP_201_CREATED)

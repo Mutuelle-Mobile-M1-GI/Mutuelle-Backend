@@ -34,13 +34,50 @@ class PaiementSolidariteSerializer(serializers.ModelSerializer):
     """
     membre_info = MembreSimpleSerializer(source='membre', read_only=True)
     session_nom = serializers.CharField(source='session.nom', read_only=True)
-    
+
     class Meta:
         model = PaiementSolidarite
         fields = [
             'id', 'membre', 'membre_info', 'session', 'session_nom',
-            'montant', 'date_paiement', 'notes'
+            'montant', 'montant_solidarite_du', 'date_paiement', 'notes'
         ]
+        extra_kwargs = {
+            'montant_solidarite_du': {'required': False, 'read_only': False},
+        }
+    '''
+        il faut modifier cette methode de sorte qu'elle prennet en compte les sessions : 
+        celle a laquelle on paye et celle pour laquelle on paye
+    '''
+    def create(self, validated_data):
+        """
+        Crée un paiement de solidarité en remplissant montant_solidarite_du
+        Logique :
+        - Premier paiement pour ce membre → utiliser montant de la configuration
+        - Paiements suivants → utiliser le montant du premier paiement (pour cohérence)
+        """
+        from core.models import ConfigurationMutuelle
+        
+        # Si montant_solidarite_du n'est pas fourni, le déterminer automatiquement
+        if 'montant_solidarite_du' not in validated_data or not validated_data.get('montant_solidarite_du'):
+            membre = validated_data.get('membre')
+            session = validated_data.get('session')
+            
+            # Chercher le PREMIER paiement de solidarité de ce membre (toutes sessions confondues)
+            premier_paiement = PaiementSolidarite.objects.filter(
+                membre=membre
+            ).order_by('date_paiement').first()
+            
+            if not premier_paiement:
+                # C'est le PREMIER paiement de solidarité de ce membre
+                config = ConfigurationMutuelle.get_configuration()
+                validated_data['montant_solidarite_du'] = config.montant_solidarite
+                print(f"📝 Premier paiement solidarité pour {membre.numero_membre}: montant dû = {validated_data['montant_solidarite_du']} FCFA")
+            else:
+                # C'est un paiement suivant, récupérer le montant du premier paiement (cohérence)
+                validated_data['montant_solidarite_du'] = premier_paiement.montant_solidarite_du
+                print(f"📝 Paiement suivant pour {membre.numero_membre} (session {session.nom}): montant dû = {validated_data['montant_solidarite_du']} FCFA (du premier paiement)")
+        
+        return super().create(validated_data)
 
 class EpargneTransactionSerializer(serializers.ModelSerializer):
     """
@@ -56,6 +93,24 @@ class EpargneTransactionSerializer(serializers.ModelSerializer):
             'id', 'membre', 'membre_info', 'type_transaction', 'type_transaction_display',
             'montant', 'session', 'session_nom', 'date_transaction', 'notes'
         ]
+    
+    def create(self, validated_data):
+        """
+        Crée un paiement de solidarité en remplissant montant_solidarite_du
+        """
+        from core.models import ConfigurationMutuelle
+        
+        # Récupérer la configuration pour le montant de solidarité
+        config = ConfigurationMutuelle.get_configuration()
+        
+        # Ajouter le montant dû (sera aussi rempli dans le save() du modèle)
+        validated_data['montant_solidarite_du'] = config.montant_solidarite
+        
+        print(f"💰 Création paiement solidarité: montant_solidarite_du = {validated_data['montant_solidarite_du']}")
+        
+        # Créer l'instance
+        return super().create(validated_data)
+
 
 class EmpruntSerializer(serializers.ModelSerializer):
     """
@@ -69,6 +124,7 @@ class EmpruntSerializer(serializers.ModelSerializer):
     montant_restant_a_rembourser = serializers.ReadOnlyField()
     montant_interets = serializers.ReadOnlyField()
     pourcentage_rembourse = serializers.ReadOnlyField()
+    montant_net_a_verser = serializers.SerializerMethodField()
     
     # Nouveaux champs calculés
     is_en_retard = serializers.ReadOnlyField()
@@ -81,7 +137,7 @@ class EmpruntSerializer(serializers.ModelSerializer):
     class Meta:
         model = Emprunt
         fields = [
-            'id', 'membre', 'membre_info', 'montant_emprunte', 'taux_interet',
+            'id', 'membre', 'membre_info', 'montant_emprunte', 'taux_interet','montant_net_a_verser',
             'montant_total_a_rembourser', 'montant_rembourse', 'montant_restant_a_rembourser',
             'montant_interets', 'pourcentage_rembourse', 'session_emprunt', 'session_nom',
             'date_emprunt', 'statut', 'statut_display', 'notes', 'remboursements_details','is_en_retard', 'jours_de_retard', 'jours_restants'
@@ -95,6 +151,13 @@ class EmpruntSerializer(serializers.ModelSerializer):
             'date_remboursement_max': {'required': False},  # 🔧 AJOUTÉ
 
         }
+    
+    def get_montant_net_a_verser(self, obj):
+        """Calcule ce que le membre reçoit réellement en main propre"""
+        if obj.montant_emprunte and obj.taux_interet:
+            interets = (obj.montant_emprunte * obj.taux_interet) / Decimal('100')
+            return obj.montant_emprunte - interets
+        return obj.montant_emprunte
     
     def validate_montant_emprunte(self, value):
         """Validation du montant d'emprunt"""
@@ -125,11 +188,15 @@ class EmpruntSerializer(serializers.ModelSerializer):
         return value
     
     def validate(self, data):
-        """Validation croisée"""
-        print(f"🔍 VALIDATION CROISÉE: {data}")
-        
+        """Validation croisée : Vérification du coefficient d'épargne"""
         membre = data.get('membre')
-        montant = data.get('montant_emprunte')
+        montant_demande = data.get('montant_emprunte')
+        
+        if membre and montant_demande:
+            # Utilise la méthode qu'on a mise dans le modèle Membre précédemment
+            peut_emprunter, message = membre.peut_emprunter(montant_demande)
+            if not peut_emprunter:
+                raise serializers.ValidationError({"montant_emprunte": message})
         
         return data
     

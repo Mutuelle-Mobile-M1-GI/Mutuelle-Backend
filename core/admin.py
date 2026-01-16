@@ -10,16 +10,13 @@ from .models import (
 class ConfigurationMutuelleAdmin(admin.ModelAdmin):
     list_display = (
         'montant_inscription_formate', 'montant_solidarite_formate', 
-        'taux_interet_formate', 'coefficient_emprunt_max', 'date_modification'
+        'taux_interet_formate', 'date_modification'
     )
     readonly_fields = ('date_creation', 'date_modification')
     
     fieldsets = (
         ('Montants de base', {
             'fields': ('montant_inscription', 'montant_solidarite')
-        }),
-        ('Paramètres d\'emprunt', {
-            'fields': ('taux_interet', 'coefficient_emprunt_max')
         }),
         ('Durée', {
             'fields': ('duree_exercice_mois',)

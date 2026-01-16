@@ -25,19 +25,21 @@ def calculer_fonds_social_total():
 
 def calculer_cumul_epargnes_total():
     """
-    Calcule le cumul total des épargnes de tous les membres (le trésor)
+    Calcule le cumul total des fonds (épargne + gains) de tous les membres
     """
     from core.models import Membre
+    from decimal import Decimal
     
-    total_epargnes = Decimal('0')
+    total_tresor = Decimal('0')
     membres_actifs = Membre.objects.filter(statut__in=['EN_REGLE', 'NON_EN_REGLE'])
     
     for membre in membres_actifs:
-        epargne_membre = membre.calculer_epargne_totale()
-        total_epargnes += epargne_membre
+        # On utilise solde_total_global qui fait : calculer_epargne_pure + calculer_total_gains
+        solde_membre = membre.solde_total_global
+        total_tresor += solde_membre
     
     return {
-        'cumul_total_epargnes': total_epargnes,
+        'cumul_total_epargnes': total_tresor,
         'nombre_membres': membres_actifs.count()
     }
 
@@ -74,8 +76,9 @@ def calculer_donnees_membre_completes(membre):
     Calcule TOUTES les données financières d'un membre
     Cette fonction est cruciale car elle retourne toutes les informations
     que le frontend doit afficher selon les spécifications
+    ✅ VERSION AMÉLIORÉE avec montants historiques corrects
     """
-    from core.models import ConfigurationMutuelle, Session
+    from core.models import ConfigurationMutuelle, Session,Exercice
     from transactions.models import (
         PaiementInscription, PaiementSolidarite, EpargneTransaction,
         Emprunt, Renflouement
@@ -84,20 +87,30 @@ def calculer_donnees_membre_completes(membre):
     config = ConfigurationMutuelle.get_configuration()
     session_courante = Session.get_session_en_cours()
     
-    # 1. INSCRIPTION
+    # 1. INSCRIPTION ✅ AMÉLIORÉ
+    premier_paiement_inscription = PaiementInscription.objects.filter(
+        membre=membre
+    ).order_by('date_paiement').first()
+
+    if premier_paiement_inscription:
+        montant_total_inscription = premier_paiement_inscription.montant_inscription_du
+    else:
+        montant_total_inscription = config.montant_inscription
+
     total_paye_inscription = PaiementInscription.objects.filter(
         membre=membre
     ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
     
     inscription_data = {
-        'montant_total_inscription': config.montant_inscription,
+        'montant_total_inscription': montant_total_inscription,
         'montant_paye_inscription': total_paye_inscription,
-        'montant_restant_inscription': config.montant_inscription - total_paye_inscription,
-        'inscription_complete': total_paye_inscription >= config.montant_inscription,
-        'pourcentage_inscription': (total_paye_inscription / config.montant_inscription * 100) if config.montant_inscription > 0 else 0
+        'montant_restant_inscription': montant_total_inscription - total_paye_inscription,
+        'inscription_complete': membre.inscription_terminee,
+        'pourcentage_inscription': (total_paye_inscription / montant_total_inscription * 100) 
+                                   if montant_total_inscription > 0 else 0
     }
     
-    # 2. SOLIDARITÉ (SESSION COURANTE + CUMUL DES DETTES)
+    # 2. SOLIDARITÉ (SESSION COURANTE + CUMUL DES DETTES) ✅ AMÉLIORÉ
     solidarite_data = {'sessions_impayees': []}
     
     if session_courante:
@@ -114,17 +127,32 @@ def calculer_donnees_membre_completes(membre):
             'solidarite_session_courante_complete': paiement_session_courante >= config.montant_solidarite
         })
     
-    # Calcul du cumul des dettes de solidarité
-    # Pour toutes les sessions depuis l'inscription du membre
+    # ✅ CALCUL CORRIGÉ DU CUMUL DES DETTES
+    # Utiliser les montants RÉELS dus (historiques) et non le montant actuel
     sessions_depuis_inscription = Session.objects.filter(
-        exercice__date_debut__gte=membre.date_inscription,
+        date_session__gte=membre.session_inscription.date_session,
         statut__in=['EN_COURS', 'TERMINEE']
     )
     
-    total_solidarite_due = sessions_depuis_inscription.count() * config.montant_solidarite
+    # Calculer le total réellement dû en additionnant les montants_solidarite_du
+    total_solidarite_due = Decimal('0')
+    for session in sessions_depuis_inscription:
+        # Vérifier s'il y a eu un paiement pour cette session
+        print(session)
+        premier_paiement = PaiementSolidarite.objects.filter(
+            membre=membre,
+            session=session
+        ).order_by('date_paiement').first()
+        
+        if premier_paiement:
+            # Utiliser le montant historique enregistré
+            total_solidarite_due += premier_paiement.montant_solidarite_du
+        else:
+            # Session non payée, utiliser le montant actuel de la config
+            total_solidarite_due += config.montant_solidarite
+    
     total_solidarite_payee = PaiementSolidarite.objects.filter(
         membre=membre,
-        session__in=sessions_depuis_inscription
     ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
     
     solidarite_data.update({
@@ -153,7 +181,7 @@ def calculer_donnees_membre_completes(membre):
         type_transaction='RETOUR_REMBOURSEMENT'
     ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
     
-    epargne_totale = epargne_base - retraits_prets + interets_recus + retours_remboursements
+    epargne_totale = epargne_base - retraits_prets + interets_recus + retours_remboursements    #quel est la difference entre interets_recu et retours_remboursements ?
     
     epargne_data = {
         'epargne_base': epargne_base,
@@ -167,10 +195,10 @@ def calculer_donnees_membre_completes(membre):
     
     # 4. EMPRUNTS
     emprunt_en_cours = Emprunt.objects.filter(
-        membre=membre,
-        statut='EN_COURS'
+     membre=membre,
+     statut='EN_COURS'
     ).first()
-    
+
     emprunt_data = {
         'a_emprunt_en_cours': emprunt_en_cours is not None,
         'montant_emprunt_en_cours': emprunt_en_cours.montant_emprunte if emprunt_en_cours else Decimal('0'),
@@ -178,16 +206,37 @@ def calculer_donnees_membre_completes(membre):
         'montant_deja_rembourse': emprunt_en_cours.montant_rembourse if emprunt_en_cours else Decimal('0'),
         'montant_restant_a_rembourser': emprunt_en_cours.montant_restant_a_rembourser if emprunt_en_cours else Decimal('0'),
         'pourcentage_rembourse': emprunt_en_cours.pourcentage_rembourse if emprunt_en_cours else 0,
-        'nombre_emprunts_total': Emprunt.objects.filter(membre=membre).count()
-    }
-    
-    # Calcul du montant maximum empruntable
+        'nombre_emprunts_total': Emprunt.objects.filter(membre=membre).count(),
+        'montant_max_empruntable': Decimal('0')
+        }
+
+
+    montant_max_empruntable = Decimal('0')
+    exercice = None  
+
+
     if not emprunt_en_cours and epargne_totale > 0:
-        montant_max_empruntable = epargne_totale * config.coefficient_emprunt_max
-    else:
-        montant_max_empruntable = Decimal('0')
+        exercice = Exercice.get_exercice_en_cours() # Requiert l'import d'Exercice au début de la fonction
     
-    emprunt_data['montant_max_empruntable'] = montant_max_empruntable
+        if exercice:
+        # On cherche la tranche qui correspond à l'épargne actuelle
+            tier = exercice.emprunt_tiers.filter(
+                min_amount__lte=epargne_totale,
+                max_amount__gte=epargne_totale
+                ).first()
+            if tier:
+            # Calcul : Epargne * Coefficient de la tranche
+                    montant_calcule = epargne_totale * Decimal(str(tier.coefficient))
+            # On applique le plafond (max_cap) s'il existe
+                    if tier.max_cap and tier.max_cap > 0:
+                        montant_max_empruntable = min(montant_calcule, tier.max_cap)
+                    else:
+                        montant_max_empruntable = montant_calcule
+                    print(f"SUCCESS: Tranche {tier.id} trouvée. Max empruntable: {montant_max_empruntable}")
+        else:
+            print(f"ERROR: Aucune tranche trouvée pour l'épargne {epargne_totale}")
+        emprunt_data['montant_max_empruntable'] = montant_max_empruntable
+   
     
     # 5. RENFLOUEMENTS
     renflouements_dus = Renflouement.objects.filter(membre=membre)
@@ -210,14 +259,33 @@ def calculer_donnees_membre_completes(membre):
     
     # 6. STATUT GLOBAL "EN RÈGLE"
     # Un membre est en règle s'il a payé son inscription complètement
-    # et s'il n'a pas de retard critique sur les autres obligations
-    en_regle = (
-        inscription_data['inscription_complete'] and
-        not (solidarite_data['dette_solidarite_cumul'] > config.montant_solidarite * 0) and  # Max 0 sessions de retard
-        not (renflouement_data['solde_renflouement_du'] > config.montant_solidarite * 0)  # Max 0x solidarité en renflouement
-        and  # Max 0 sessions de retard
-        not (emprunt_data['montant_restant_a_rembourser'] >  1)
-    )
+    # et s'il n'a pas de retard critique sur les autres obligations excepter les renflouementsnt
+    from core.models import Membre
+    
+    peut_definir_statuts = Membre.peut_definir_statuts_membre(membre)
+    
+    if not peut_definir_statuts:
+        # Avant 3 sessions, on ne définit pas les statuts
+        en_regle = 'NON_DEFINI'  # Statut indéterminé
+        print(f"⏳ Membre {membre.numero_membre}: Statut non défini (< 3 sessions)")
+    else:
+        # Après 3 sessions, on applique les règles normales
+
+        if solidarite_data['solidarite_a_jour'] :
+            print('%%%%%%%%%%%%%% solidarite a jour')
+        else:
+            print('%%%%%%%%%%%%%% solidarite pas a jour')
+        if emprunt_data['montant_restant_a_rembourser'] < Decimal('100') :
+            print('%%%%%%%%%%%%%% emprunt restant < 100')
+        else :
+            print('%%%%%%%%%%%%%% emprunt restant >= 100')
+
+        en_regle = (
+            solidarite_data['solidarite_a_jour'] and
+            inscription_data['inscription_complete'] and
+            emprunt_data['montant_restant_a_rembourser'] < Decimal('100')
+        )
+        print(f"✅ Membre {membre.numero_membre}: En règle = {en_regle}")
     
     # 7. DONNÉES CONSOLIDÉES
     donnees_completes = {

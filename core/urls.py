@@ -9,6 +9,7 @@ router.register(r'sessions', views.SessionViewSet)
 router.register(r'membres', views.MembreViewSet)
 router.register(r'types-assistance', views.TypeAssistanceViewSet)
 router.register(r'fonds-social', views.FondsSocialViewSet)
+router.register(r'emprunt-tiers', views.EmpruntCoefficientTierViewSet, basename='emprunt-tier')
 
 urlpatterns = [
     path('', include(router.urls)),
