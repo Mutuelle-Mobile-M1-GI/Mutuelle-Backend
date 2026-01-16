@@ -34,13 +34,50 @@ class PaiementSolidariteSerializer(serializers.ModelSerializer):
     """
     membre_info = MembreSimpleSerializer(source='membre', read_only=True)
     session_nom = serializers.CharField(source='session.nom', read_only=True)
-    
+
     class Meta:
         model = PaiementSolidarite
         fields = [
             'id', 'membre', 'membre_info', 'session', 'session_nom',
-            'montant', 'date_paiement', 'notes'
+            'montant', 'montant_solidarite_du', 'date_paiement', 'notes'
         ]
+        extra_kwargs = {
+            'montant_solidarite_du': {'required': False, 'read_only': False},
+        }
+    '''
+        il faut modifier cette methode de sorte qu'elle prennet en compte les sessions : 
+        celle a laquelle on paye et celle pour laquelle on paye
+    '''
+    def create(self, validated_data):
+        """
+        Crée un paiement de solidarité en remplissant montant_solidarite_du
+        Logique :
+        - Premier paiement pour ce membre → utiliser montant de la configuration
+        - Paiements suivants → utiliser le montant du premier paiement (pour cohérence)
+        """
+        from core.models import ConfigurationMutuelle
+        
+        # Si montant_solidarite_du n'est pas fourni, le déterminer automatiquement
+        if 'montant_solidarite_du' not in validated_data or not validated_data.get('montant_solidarite_du'):
+            membre = validated_data.get('membre')
+            session = validated_data.get('session')
+            
+            # Chercher le PREMIER paiement de solidarité de ce membre (toutes sessions confondues)
+            premier_paiement = PaiementSolidarite.objects.filter(
+                membre=membre
+            ).order_by('date_paiement').first()
+            
+            if not premier_paiement:
+                # C'est le PREMIER paiement de solidarité de ce membre
+                config = ConfigurationMutuelle.get_configuration()
+                validated_data['montant_solidarite_du'] = config.montant_solidarite
+                print(f"📝 Premier paiement solidarité pour {membre.numero_membre}: montant dû = {validated_data['montant_solidarite_du']} FCFA")
+            else:
+                # C'est un paiement suivant, récupérer le montant du premier paiement (cohérence)
+                validated_data['montant_solidarite_du'] = premier_paiement.montant_solidarite_du
+                print(f"📝 Paiement suivant pour {membre.numero_membre} (session {session.nom}): montant dû = {validated_data['montant_solidarite_du']} FCFA (du premier paiement)")
+        
+        return super().create(validated_data)
 
 class EpargneTransactionSerializer(serializers.ModelSerializer):
     """
@@ -56,6 +93,24 @@ class EpargneTransactionSerializer(serializers.ModelSerializer):
             'id', 'membre', 'membre_info', 'type_transaction', 'type_transaction_display',
             'montant', 'session', 'session_nom', 'date_transaction', 'notes'
         ]
+    
+    def create(self, validated_data):
+        """
+        Crée un paiement de solidarité en remplissant montant_solidarite_du
+        """
+        from core.models import ConfigurationMutuelle
+        
+        # Récupérer la configuration pour le montant de solidarité
+        config = ConfigurationMutuelle.get_configuration()
+        
+        # Ajouter le montant dû (sera aussi rempli dans le save() du modèle)
+        validated_data['montant_solidarite_du'] = config.montant_solidarite
+        
+        print(f"💰 Création paiement solidarité: montant_solidarite_du = {validated_data['montant_solidarite_du']}")
+        
+        # Créer l'instance
+        return super().create(validated_data)
+
 
 class EmpruntSerializer(serializers.ModelSerializer):
     """

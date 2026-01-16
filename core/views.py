@@ -199,6 +199,51 @@ class SessionViewSet(viewsets.ModelViewSet):
     ordering = ['-date_session']
     permission_classes = [IsAdminOrReadOnly]
     
+    def perform_create(self, serializer):
+        """
+        Personnalisé : appelé APRÈS la validation, AVANT la sauvegarde lors d'un POST
+        
+        Respecte la logique complète de Session.save() du modèle :
+        1. Auto-génère le nom si pas fourni
+        2. Assigne l'exercice en cours si pas fourni
+        3. Gère les sessions EN_COURS (une seule par exercice)
+        4. Traite la collation si montant > 0 et statut = EN_COURS
+        """
+        print("=" * 100)
+        print("🔍 CRÉATION DE SESSION - perform_create()")
+        print(f"📡 Données reçues: {serializer.validated_data}")
+        print("=" * 50)
+        
+        # Vérifier que l'exercice est assigné
+        if 'exercice' not in serializer.validated_data or not serializer.validated_data.get('exercice'):
+            exercice_actuel = Exercice.get_exercice_en_cours()
+            if exercice_actuel:
+                serializer.validated_data['exercice'] = exercice_actuel
+                print(f"✅ Exercice auto-assigné: {exercice_actuel.nom}")
+            else:
+                print("⚠️ ATTENTION: Aucun exercice en cours trouvé")
+        
+        # Laisser le modèle.save() gérer toute la logique métier
+        # (nom auto-généré, gestion sessions EN_COURS, collation, renflouements, etc.)
+        print("✅ Appel de serializer.save() → Session.save() du modèle prendra le relais")
+        try:
+            serializer.save()
+            
+            print(f"✅ Session créée avec succès:")
+            print(f"   - Nom: {serializer.instance.nom}")
+            print(f"   - Exercice: {serializer.instance.exercice.nom}")
+            print(f"   - Statut: {serializer.instance.statut}")
+            print(f"   - Collation: {serializer.instance.montant_collation}")
+            print("=" * 100)
+        except Exception as e:
+            print(f"❌ ERREUR CRÉATION SESSION: {e}")
+            print("=" * 100)
+            # ✅ Relancer l'exception pour que DRF la gère correctement
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({
+                'detail': str(e)
+            })
+    
     @action(detail=False, methods=['get'], permission_classes=[AllowAny])
     def current(self, request):
         """

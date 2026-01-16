@@ -24,6 +24,13 @@ class PaiementInscription(models.Model):
         validators=[MinValueValidator(0)],
         verbose_name="Montant payé (FCFA)"
     )
+    # ✅ NOUVEAU CHAMP qui va stocker le montant total de l'inscrption que le membre va devoir payer
+    montant_inscription_du = models.DecimalField(
+        max_digits=12, decimal_places=2,
+        validators=[MinValueValidator(0)],
+        verbose_name="Montant total dû pour l'inscription (FCFA)",
+        help_text="Montant configuré au moment de l'inscription du membre"
+    )
     date_paiement = models.DateTimeField(auto_now_add=True, verbose_name="Date de paiement")
     session = models.ForeignKey(Session, on_delete=models.CASCADE, related_name='paiements_inscription', verbose_name="Session")
     notes = models.TextField(blank=True, verbose_name="Notes")
@@ -35,9 +42,35 @@ class PaiementInscription(models.Model):
         
     def save(self, *args, **kwargs):
         is_new = self.pk is None
+        
+        # ✅ LOGIC AMÉLIORÉE: Gérer le montant_inscription_du
+        if is_new:
+            # Pour le premier paiement, enregistrer le montant actuel de la config
+            premier_paiement = PaiementInscription.objects.filter(
+                membre=self.membre
+            ).exists()
+            
+            if not premier_paiement:
+                # C'est le PREMIER paiement d'inscription de ce membre
+                from core.models import ConfigurationMutuelle
+                config = ConfigurationMutuelle.get_configuration()
+                self.montant_inscription_du = config.montant_inscription
+                print(f"📝 Premier paiement inscription: montant dû = {self.montant_inscription_du}")
+            else:
+                # C'est un paiement suivant, récupérer le montant du premier paiement
+                self.montant_inscription_du = premier_paiement.montant_inscription_du
+                print(f"📝 Paiement suivant: montant dû = {self.montant_inscription_du}")
+        
         super().save(*args, **kwargs)
         
-        # Alimenter le fonds social à chaque paiement d'inscription
+        # ✅ Mettre à jour le statut inscription_terminee du membre
+        if is_new:
+            print('%%%%%%%%%%%mise a jour de insctiption_termine')
+            self.membre.update_inscription_terminee()
+            print(self.membre.update_inscription_terminee())
+            self.membre.save()
+        
+        # Alimenter le fonds social
         if is_new:
             from core.models import FondsSocial
             fonds = FondsSocial.get_fonds_actuel()
@@ -62,6 +95,13 @@ class PaiementSolidarite(models.Model):
         validators=[MinValueValidator(0)],
         verbose_name="Montant payé (FCFA)"
     )
+    # ✅ NOUVEAU CHAMP pour stocker le montant total de la solidarite que le membre va devoir payer
+    montant_solidarite_du = models.DecimalField(
+        max_digits=12, decimal_places=2,
+        validators=[MinValueValidator(0)],
+        verbose_name="Montant dû pour cette session (FCFA)",
+        help_text="Montant configuré au moment du paiement de cette session"
+    )
     date_paiement = models.DateTimeField(auto_now_add=True, verbose_name="Date de paiement")
     notes = models.TextField(blank=True, verbose_name="Notes")
     
@@ -69,18 +109,33 @@ class PaiementSolidarite(models.Model):
         verbose_name = "Paiement de solidarité"
         verbose_name_plural = "Paiements de solidarité"
         ordering = ['-date_paiement']
-        unique_together = [['membre', 'session']]
+        # ❌ RETIRER unique_together car on peut payer en plusieurs fois
+        # unique_together = [['membre', 'session']]
         
     def save(self, *args, **kwargs):
         is_new = self.pk is None
+        # ✅ LOGIC AMÉLIORÉE: Enregistrer le montant dû au moment du paiement
+        if is_new and not self.montant_solidarite_du:
+            from core.models import ConfigurationMutuelle
+            config = ConfigurationMutuelle.get_configuration()
+            self.montant_solidarite_du = config.montant_solidarite
+            print(f"💰 Solidarité session {self.session.nom}: montant dû = {self.montant_solidarite_du}")
         super().save(*args, **kwargs)
         
+        # ✅ CORRECTION: Ne mettre à jour le statut que si on peut définir les statuts (≥3 sessions)
         try:
-            if self.membre.calculer_statut_en_regle() :
+            from core.models import Membre
+            peut_definir_statuts = Membre.peut_definir_statuts_membre(membre=self.membre)
+            
+            if peut_definir_statuts and self.membre.calculer_statut_en_regle():
                 self.membre.statut = 'EN_REGLE'
                 self.membre.save()
-        except :
-            print(f"Erreur de calcul de sttus en regle  ")
+            elif peut_definir_statuts:
+                # Si on peut définir les statuts mais membre n'est pas en règle
+                self.membre.statut = 'NON_EN_REGLE'
+                self.membre.save()
+        except Exception as e:
+            print(f"Erreur de calcul de statut en règle: {e}")
             pass
         
         # Alimenter le fonds social à chaque paiement de solidarité
@@ -482,11 +537,14 @@ class Remboursement(models.Model):
         )
         self.emprunt.save()
         try:
-            if self.emprunt.membre.calculer_statut_en_regle() :
+            from core.models import Membre
+            peut_definir_statuts = Membre.peut_definir_statuts_membre(membre=self.emprunt.membre)
+            
+            if peut_definir_statuts and self.emprunt.membre.calculer_statut_en_regle():
                 self.emprunt.membre.statut = 'EN_REGLE'
                 self.emprunt.membre.save()
-        except :
-            print(f"Erreur de calcul de sttus en regle  ")
+        except Exception as e:
+            print(f"Erreur de calcul de statut en règle: {e}")
             pass
         
         # Redistribution des intérêts aux membres
@@ -607,17 +665,16 @@ class AssistanceAccordee(models.Model):
         print(f"Assistance payée: {self.montant:,.0f} FCFA prélevés du fonds social")
     
     def _creer_renflouement(self):
-        """Crée les renflouements pour tous les membres en règle"""
+        """Crée les renflouements pour tous les membres"""
         # Prendre les membres qui étaient en règle AVANT le paiement de l'assistance
         membres_en_regle = Membre.objects.filter(
-            statut='EN_REGLE',
-            date_inscription__lte=self.date_paiement or timezone.now()
+            date_inscription__lte=self.date_session
         )
         
         nombre_membres = membres_en_regle.count()
-        if nombre_membres == 0:
-            print("ATTENTION: Aucun membre en règle pour le renflouement")
-            return
+        # if nombre_membres == 0:
+        #     print("ATTENTION: Aucun membre en règle pour le renflouement")
+        #     return
         
         montant_par_membre = (self.montant / nombre_membres).quantize(
             Decimal('0.01'), rounding=ROUND_HALF_UP
@@ -635,8 +692,9 @@ class AssistanceAccordee(models.Model):
             
             renflouements_crees += 1
             try:
-                membre.statut='NON_EN_REGLE'
-                membre.save()
+                if Membre.peut_definir_statuts_membre(membre=membre):
+                    membre.statut='NON_EN_REGLE'
+                    membre.save()
             except Exception as e:
                 print(f"Echec de la MAJ du statut du membre : {e}")
                 

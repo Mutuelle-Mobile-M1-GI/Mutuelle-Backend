@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from django.db import models
 import uuid
+from django.db import models, transaction
+from django.core.exceptions import ValidationError
 
 class ConfigurationMutuelle(models.Model):
     """
@@ -183,32 +185,129 @@ class Exercice(models.Model):
     
     def save(self, *args, **kwargs):
         """
-        Calcule automatiquement la date_fin si elle n'est pas fournie
+        ✅ VERSION ATOMIQUE : Gestion automatique du cycle d'exercice
+        
+        Quand un nouvel exercice EN_COURS est créé:
+        1. Marquer l'exercice EN_COURS précédent comme TERMINE
+        2. Marquer la session EN_COURS comme TERMINEE
+        3. Calculer automatiquement date_fin si nécessaire
+        4. Créer un nouveau FondsSocial avec le même montant que le précédent
+        5. Sauvegarder le nouvel exercice
+        
+        ⚠️ Si n'importe quelle étape échoue, TOUT est annulé (rollback)
         """
+        old_statut = None
+        is_new = self.pk is None
+        
         # ✅ Générer le nom automatiquement si pas fourni
         if not self.nom:
             year = self.date_debut.year if self.date_debut else datetime.now().year
             self.nom = f"Exercice {year}"
         
+        # ✅ Obtenir l'ancien statut SEULEMENT si l'instance existe déjà
+        if not is_new:
+            try:
+                old_instance = Exercice.objects.get(pk=self.pk)
+                old_statut = old_instance.statut
+            except Exercice.DoesNotExist:
+                is_new = True
+                old_statut = None
+        
         # ✅ Calculer date_fin automatiquement si pas fournie
         if self.date_debut and not self.date_fin:
             try:
-                # Récupérer la configuration actuelle
                 config = ConfigurationMutuelle.get_configuration()
                 duree_mois = config.duree_exercice_mois
-                
-                # Calculer date de fin en ajoutant la durée en mois
                 self.date_fin = self.date_debut + relativedelta(months=duree_mois)
-                
                 print(f"✅ Date de fin calculée automatiquement: {self.date_fin} (durée: {duree_mois} mois)")
-                
             except Exception as e:
                 print(f"❌ Erreur calcul date_fin: {e}")
-                # Fallback: ajouter 12 mois par défaut
                 self.date_fin = self.date_debut + relativedelta(months=12)
                 print(f"🔄 Fallback: date_fin = {self.date_fin} (12 mois par défaut)")
         
-        super().save(*args, **kwargs)
+        # 🔒 TRANSACTION ATOMIQUE : Tout réussit ou tout échoue
+        with transaction.atomic():
+            # ✅ SI C'EST UN NOUVEL EXERCICE AVEC STATUT EN_COURS
+            if is_new and self.statut == 'EN_COURS':
+                # 1️⃣ Marquer l'exercice EN_COURS précédent comme TERMINE
+                previous_current_exercice = Exercice.objects.filter(
+                    statut='EN_COURS'
+                ).first()
+                
+                if previous_current_exercice:
+                    previous_current_exercice.statut = 'TERMINE'
+                    previous_current_exercice.save(update_fields=['statut', 'date_modification'])
+                    print(f"📝 Exercice précédent {previous_current_exercice.nom} marqué comme TERMINE")
+                
+                # 2️⃣ Marquer la session EN_COURS comme TERMINEE
+                current_session = Session.objects.filter(statut='EN_COURS').first()
+                if current_session:
+                    current_session.statut = 'TERMINEE'
+                    current_session.save(update_fields=['statut', 'date_modification'])
+                    print(f"📝 Session courante {current_session.nom} marquée comme TERMINEE")
+            
+            # ✅ SAUVEGARDER L'EXERCICE
+            super().save(*args, **kwargs)
+            print(f"✅ Exercice {self.nom} sauvegardé avec statut {self.statut}")
+            
+            # ✅ SI C'EST UN NOUVEL EXERCICE EN_COURS: Réinitialiser statuts des membres
+            if is_new and self.statut == 'EN_COURS':
+                # 3️⃣ Réinitialiser le statut de tous les membres à NON_DEFINI
+                try:
+                    nombre_membres_modifies = Membre.objects.all().update(statut='NON_DEFINI')
+                    print(f"✅ Statuts de {nombre_membres_modifies} membres réinitialisés à 'NON_DEFINI'")
+                except Exception as e:
+                    print(f"❌ ERREUR lors de la réinitialisation des statuts des membres: {e}")
+                    raise ValidationError(
+                        f"❌ IMPOSSIBLE DE RÉINITIALISER LES STATUTS DES MEMBRES\n"
+                        f"   {str(e)}"
+                    )
+            
+            # ✅ SI C'EST UN NOUVEL EXERCICE EN_COURS: Dupliquer le FondsSocial
+            if is_new and self.statut == 'EN_COURS':
+                try:
+                    # 3️⃣ Récupérer le FondsSocial de l'exercice précédent
+                    ancien_fonds = None
+                    if previous_current_exercice:
+                        try:
+                            ancien_fonds = FondsSocial.objects.get(exercice=previous_current_exercice)
+                            montant_a_conserver = ancien_fonds.montant_total
+                        except FondsSocial.DoesNotExist:
+                            montant_a_conserver = Decimal('0')
+                            print(f"⚠️ Aucun FondsSocial trouvé pour {previous_current_exercice.nom}")
+                    else:
+                        montant_a_conserver = Decimal('0')
+                    
+                    # 4️⃣ Créer un nouveau FondsSocial pour le nouvel exercice
+                    nouveau_fonds, created = FondsSocial.objects.get_or_create(
+                        exercice=self,
+                        defaults={
+                            'montant_total': montant_a_conserver
+                        }
+                    )
+                    
+                    if created:
+                        print(f"✅ Nouveau FondsSocial créé pour {self.nom}")
+                        print(f"   Montant conservé: {montant_a_conserver:,.0f} FCFA")
+                        
+                        # 5️⃣ Créer une ligne de mouvement pour tracer le transfert
+                        if ancien_fonds and montant_a_conserver > 0:
+                            MouvementFondsSocial.objects.create(
+                                fonds_social=nouveau_fonds,
+                                type_mouvement='ENTREE',
+                                montant=montant_a_conserver,
+                                description=f"Transfert FondsSocial de {previous_current_exercice.nom} à {self.nom}"
+                            )
+                            print(f"📝 Mouvement FondsSocial enregistré : Transfert de {montant_a_conserver:,.0f} FCFA")
+                    else:
+                        print(f"⚠️ FondsSocial existant pour {self.nom}")
+                        
+                except Exception as e:
+                    print(f"❌ ERREUR lors de la gestion FondsSocial: {e}")
+                    raise ValidationError(
+                        f"❌ IMPOSSIBLE DE CRÉER L'EXERCICE : Erreur FondsSocial\n"
+                        f"   {str(e)}"
+                    )
     
     def __str__(self):
         date_fin_str = self.date_fin.strftime("%Y-%m-%d") if self.date_fin else "Non définie"
@@ -362,10 +461,21 @@ class Session(models.Model):
     
     def save(self, *args, **kwargs):
         """
-        ✅ CORRECTION : Gestion correcte des nouvelles instances et mises à jour
+        ✅ VERSION ATOMIQUE : Tout réussit ou rien n'est enregistré
+        
+        Ordre des opérations :
+        1. Générer le nom si nécessaire
+        2. Assigner l'exercice si nécessaire
+        3. Marquer l'ancienne session comme TERMINEE si nécessaire
+        4. VÉRIFIER le fonds social AVANT de sauvegarder (si collation > 0)
+        5. Sauvegarder la session
+        6. Créer les renflouements
+        7. Retirer l'argent du fonds social
+        
+        ⚠️ Si n'importe quelle étape échoue, TOUT est annulé (rollback)
         """
         old_statut = None
-        is_new = self.pk is None  # ✅ Vérifier si c'est une nouvelle instance
+        is_new = self.pk is None
         
         # ✅ Générer nom automatiquement si pas fourni
         if not self.nom:
@@ -387,7 +497,6 @@ class Session(models.Model):
                 old_instance = Session.objects.get(pk=self.pk)
                 old_statut = old_instance.statut
             except Session.DoesNotExist:
-                # L'instance a été supprimée entre temps, traiter comme nouvelle
                 is_new = True
                 old_statut = None
         
@@ -397,7 +506,6 @@ class Session(models.Model):
             if exercice_en_cours:
                 self.exercice = exercice_en_cours
             else:
-                # Créer ou récupérer un exercice par défaut
                 from datetime import date
                 exercice, created = Exercice.objects.get_or_create(
                     statut='EN_COURS',
@@ -409,96 +517,141 @@ class Session(models.Model):
                 )
                 self.exercice = exercice
         
-        # --- Début de la modification ---
-        # Si c'est une nouvelle session et qu'elle est "EN_COURS",
-        # marquez la session précédente (le cas échéant) comme "TERMINEE"
-        if is_new and self.statut == 'EN_COURS':
-            # Récupérer la session 'EN_COURS' pour le même exercice, si elle existe
-            # et n'est pas l'instance actuelle (au cas où elle aurait été modifiée)
-            previous_current_session = Session.objects.filter(
-                exercice=self.exercice,
-                statut='EN_COURS'
-            ).exclude(pk=self.pk).first() # Exclure l'instance actuelle si elle existe déjà
-
-            if previous_current_session:
-                previous_current_session.statut = 'TERMINEE'
-                previous_current_session.save(update_fields=['statut'])
-        # --- Fin de la modification ---
+        # ✅ VÉRIFIER SI C'EST LA PREMIÈRE SESSION (table vide)
+        is_first_session = Session.objects.count() == 0
         
-        # ✅ Sauvegarder l'instance
-        super().save(*args, **kwargs)
+        if is_first_session:
+            print(f"⚠️ PREMIÈRE SESSION DE LA TABLE : Pas de traitement de collation")
         
-        # ✅ Traiter la collation seulement si le statut change vers EN_COURS
-        if self.statut == 'EN_COURS' :
-            if self.montant_collation > 0:
-                try:
-                    self._traiter_collation()
-                except Exception as e:
-                    print(f"❌ Erreur traitement collation: {e}")
-    
-    def _traiter_collation(self):
-        """
-        Traite le paiement de la collation:
-        1. Prélève du fonds social
-        2. Crée les renflouements pour tous les membres en règle
-        """
-        print(f"🎯 Traitement collation pour session {self.nom}: {self.montant_collation:,.0f} FCFA")
-        
-        # 1. VÉRIFIER ET PRÉLEVER DU FONDS SOCIAL
-        try:
-            # Importer ici pour éviter les imports circulaires
-            from .models import FondsSocial  # Ajuste le chemin selon ta structure
+        # ✅ VÉRIFIER LE FONDS SOCIAL AVANT DE COMMENCER LA TRANSACTION
+        # Si la collation est > 0 ET ce n'est pas la première session, on vérifie AVANT de créer quoi que ce soit
+        if is_new and self.statut == 'EN_COURS' and self.montant_collation > 0 and not is_first_session:
+            from core.models import FondsSocial
             
             fonds = FondsSocial.get_fonds_actuel()
             if not fonds:
-                print("❌ ERREUR: Aucun fonds social actuel trouvé pour la collation")
-                return False
+                raise ValidationError(
+                    "❌ IMPOSSIBLE DE CRÉER LA SESSION : Aucun fonds social actuel trouvé"
+                )
             
-            if not fonds.retirer_montant(
-                self.montant_collation,
-                f"Collation Session {self.nom} - {self.date_session}"
-            ):
-                print(f"❌ ERREUR: Fonds social insuffisant pour la collation de {self.montant_collation:,.0f} FCFA")
-                return False
+            if fonds.montant_total < self.montant_collation:
+                raise ValidationError(
+                    f"❌ IMPOSSIBLE DE CRÉER LA SESSION : Fonds social insuffisant.\n"
+                    f"   Disponible : {fonds.montant_total:,.0f} FCFA\n"
+                    f"   Nécessaire : {self.montant_collation:,.0f} FCFA\n"
+                    f"   Manque : {self.montant_collation - fonds.montant_total:,.0f} FCFA"
+                )
             
-        except Exception as e:
-            print(f"❌ Erreur lors du prélèvement du fonds social: {e}")
-            return False
+            print(f"✅ Vérification fonds social OK : {fonds.montant_total:,.0f} FCFA disponible")
         
-        # 2. CRÉER LES RENFLOUEMENTS
-        try:
-            success = self._creer_renflouement_collation()
-            if success:
-                print(f"✅ Collation payée: {self.montant_collation:,.0f} FCFA prélevés du fonds social")
-                return True
-            else:
-                print(f"⚠️ Problème lors de la création des renflouements")
-                return False
-        except Exception as e:
-            print(f"❌ Erreur lors de la création des renflouements: {e}")
-            return False
+        # 🔒 TRANSACTION ATOMIQUE : Tout réussit ou tout échoue
+        with transaction.atomic():
+            # ✅ Marquer l'ancienne session EN_COURS comme TERMINEE
+            if is_new and self.statut == 'EN_COURS':
+                previous_current_session = Session.objects.filter(
+                    exercice=self.exercice,
+                    statut='EN_COURS'
+                ).exclude(pk=self.pk).first()
+                
+                if previous_current_session:
+                    previous_current_session.statut = 'TERMINEE'
+                    previous_current_session.save(update_fields=['statut'])
+                    print(f"📝 Session précédente {previous_current_session.nom} marquée comme TERMINEE")
+            
+            # ✅ SAUVEGARDER LA SESSION
+            super().save(*args, **kwargs)
+            print(f"✅ Session {self.nom} sauvegardée en base")
+            
+            # ✅ TRAITER LA COLLATION (si nécessaire ET ce n'est pas la première session)
+            if is_new and self.statut == 'EN_COURS' and self.montant_collation > 0 and not is_first_session:
+                print(f"🎯 Traitement collation : {self.montant_collation:,.0f} FCFA")
+                
+                # 1. Créer les renflouements D'ABORD
+                if not self._creer_renflouement_collation():
+                    raise ValidationError(
+                        "❌ ÉCHEC : Impossible de créer les renflouements de collation"
+                    )
+                
+                # 2. Retirer du fonds social ENSUITE
+                if not self._retirer_collation_fonds_social():
+                    raise ValidationError(
+                        "❌ ÉCHEC : Impossible de retirer la collation du fonds social"
+                    )
+                
+                print(f"✅ Collation traitée avec succès : {self.montant_collation:,.0f} FCFA")
+                
+        self.mettre_a_jour_statuts_membres()
+
+    def mettre_a_jour_statuts_membres(self):
+        """
+        Met à jour le statut (EN_REGLE / NON_EN_REGLE) de tous les membres
+        si leur statut est désormais définissable.
+        """
+        from core.models import Membre
+        from django.db import transaction
+
+        membres = Membre.objects.exclude(statut='SUSPENDU')
+
+        print(f"🔄 Mise à jour des statuts pour {membres.count()} membres")
+
+        with transaction.atomic():
+            for membre in membres:
+                peut_definir_statuts = Membre.peut_definir_statuts_membre(membre)
+
+                if not peut_definir_statuts:
+                    # ⏳ On ne touche pas au statut
+                    print(
+                        f"⏳ {membre.numero_membre} : "
+                        f"statut non définissable → {membre.statut}"
+                    )
+                    continue
+
+                est_en_regle = membre.calculer_statut_en_regle()
+
+                nouveau_statut = 'EN_REGLE' if est_en_regle == 'EN_REGLE' else 'NON_EN_REGLE'
+
+                if membre.statut != nouveau_statut:
+                    print(
+                        f"🔁 {membre.numero_membre} : "
+                        f"{membre.statut} → {nouveau_statut}"
+                    )
+                    membre.statut = nouveau_statut
+                    membre.save(update_fields=['statut'])
+                else:
+                    print(
+                        f"✅ {membre.numero_membre} : "
+                        f"statut inchangé ({membre.statut})"
+                    )
+        
+
     
     def _creer_renflouement_collation(self):
-        """Crée les renflouements pour la collation"""
+        """
+        Crée les renflouements pour la collation
+        
+        pour l'instant on va considerer que tout le monde participe au renflouement
+
+        Returns:
+            bool: True si succès, False si échec
+        """
         try:
-            # Importer ici pour éviter les imports circulaires
-            from .models import Membre  # Ajuste selon ta structure
-            from transactions.models import Renflouement  # Ajuste selon ta structure
-            from decimal import Decimal, ROUND_HALF_UP
+            from core.models import Membre
+            from transactions.models import Renflouement
             
             membres_en_regle = Membre.objects.filter(
-                statut='EN_REGLE',
                 date_inscription__lte=self.date_session
             )
             
             nombre_membres = membres_en_regle.count()
             if nombre_membres == 0:
-                print("⚠️ ATTENTION: Aucun membre en règle pour le renflouement de collation")
+                print("⚠️ ATTENTION : Aucun membre pour le renflouement de collation")
                 return False
             
             montant_par_membre = (Decimal(str(self.montant_collation)) / nombre_membres).quantize(
                 Decimal('0.01'), rounding=ROUND_HALF_UP
             )
+            
+            print(f"👥 {nombre_membres} membres en règle → {montant_par_membre:,.0f} FCFA chacun")
             
             renflouements_crees = 0
             for membre in membres_en_regle:
@@ -514,14 +667,56 @@ class Session(models.Model):
                     )
                     if created:
                         renflouements_crees += 1
+                        print(f"   ✅ Renflouement créé pour {membre.numero_membre}")
+                    else:
+                        print(f"   ⚠️ Renflouement déjà existant pour {membre.numero_membre}")
+                        
                 except Exception as e:
-                    print(f"❌ Erreur création renflouement pour {membre}: {e}")
+                    print(f"   ❌ Erreur création renflouement pour {membre.numero_membre}: {e}")
+                    raise  # ✅ RELANCER pour faire échouer la transaction
             
-            print(f"✅ Renflouement collation: {renflouements_crees}/{nombre_membres} créés - {montant_par_membre:,.0f} FCFA chacun")
-            return renflouements_crees > 0
+            if renflouements_crees == 0 and nombre_membres > 0:
+                print("⚠️ Aucun nouveau renflouement créé (peut-être déjà existants)")
+            else:
+                print(f"✅ {renflouements_crees} renflouements créés avec succès")
+            
+            return True
             
         except Exception as e:
-            print(f"❌ Erreur dans _creer_renflouement_collation: {e}")
+            print(f"❌ ERREUR dans _creer_renflouement_collation: {e}")
+            return False
+    
+    def _retirer_collation_fonds_social(self):
+        """
+        Retire le montant de la collation du fonds social
+        
+        Returns:
+            bool: True si succès, False si échec
+        """
+        try:
+            from core.models import FondsSocial
+            
+            fonds = FondsSocial.get_fonds_actuel()
+            if not fonds:
+                print("❌ ERREUR : Aucun fonds social actuel trouvé")
+                return False
+            
+            print(f"💰 Fonds social avant retrait : {fonds.montant_total:,.0f} FCFA")
+            
+            # Retirer le montant
+            if not fonds.retirer_montant(
+                self.montant_collation,
+                f"Collation Session {self.nom} - {self.date_session}"
+            ):
+                print(f"❌ ERREUR : Échec du retrait de {self.montant_collation:,.0f} FCFA")
+                return False
+            
+            print(f"💰 Fonds social après retrait : {fonds.montant_total:,.0f} FCFA")
+            print(f"✅ {self.montant_collation:,.0f} FCFA retirés du fonds social")
+            return True
+            
+        except Exception as e:
+            print(f"❌ ERREUR dans _retirer_collation_fonds_social: {e}")
             return False
     
     def clean(self):
@@ -539,8 +734,6 @@ class Session(models.Model):
                 raise ValidationError({
                     'statut': f'Il y a déjà une session en cours pour cet exercice: {existing.nom}'
                 })
-
-
 
 class TypeAssistance(models.Model):
     """
@@ -574,18 +767,25 @@ class Membre(models.Model):
         ('EN_REGLE', 'En règle'),
         ('NON_EN_REGLE', 'Non en règle'),
         ('SUSPENDU', 'Suspendu'),
+        ('NON_DEFINI', 'Non defini'),
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     utilisateur = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='membre_profile')
     numero_membre = models.CharField(max_length=20, unique=True, verbose_name="Numéro de membre")
     date_inscription = models.DateField(verbose_name="Date d'inscription")
-    statut = models.CharField(max_length=15, choices=STATUS_CHOICES, default='NON_EN_REGLE', verbose_name="Statut")
+    statut = models.CharField(max_length=15, choices=STATUS_CHOICES, default='NON_DEFINI', verbose_name="Statut")
     exercice_inscription = models.ForeignKey(Exercice, on_delete=models.CASCADE, related_name='nouveaux_membres', verbose_name="Exercice d'inscription")
     session_inscription = models.ForeignKey(Session, on_delete=models.CASCADE, related_name='nouveaux_membres', verbose_name="Session d'inscription")
     date_creation = models.DateTimeField(auto_now_add=True)
     date_modification = models.DateTimeField(auto_now=True)
-    
+    #nouveau champ pour indiquer si l'inscription est terminee
+    inscription_terminee = models.BooleanField(
+        default=False,
+        verbose_name="Inscription terminée",
+        help_text="True si le membre a payé la totalité de son inscription"
+    )
+
     class Meta:
         verbose_name = "Membre"
         verbose_name_plural = "Membres"
@@ -685,7 +885,117 @@ class Membre(models.Model):
             else:
                 self.numero_membre = "ENS-0001"
         super().save(*args, **kwargs)
+    
+    @classmethod
+    def peut_definir_statuts_membre(cls, membre):
+        """
+        Détermine si on peut attribuer un statut (EN_REGLE / NON_EN_REGLE)
+        à un membre donné.
+
+        Règle :
+        - Le membre doit avoir vécu AU MOINS 3 sessions (dans l'exercice actuel)
+        - Sessions TERMINÉES ou EN_COURS
         
+        ✅ LOGIQUE CORRIGÉE :
+        - Si le membre s'est inscrit dans l'exercice EN_COURS : 
+          → Compter depuis sa session d'inscription
+        - Si le membre s'est inscrit dans un exercice TERMINE :
+          → Compter UNIQUEMENT les sessions du nouvel exercice EN_COURS
+          → (car son statut a été réinitialisé au changement d'exercice)
+        """
+        from core.models import Session, Exercice
+
+        # Récupérer l'exercice en cours
+        exercice_actuel = Exercice.get_exercice_en_cours()
+        if not exercice_actuel:
+            print(f"⏳ Membre {membre.numero_membre} : Pas d'exercice EN_COURS")
+            return False
+
+        # 🔄 LOGIQUE : Le membre a-t-il la même date d'inscription que l'exercice actuel ?
+        # (i.e., s'est-il inscrit dans l'exercice EN_COURS ?)
+        if membre.exercice_inscription == exercice_actuel:
+            # ✅ CAS 1: Le membre s'est inscrit dans l'exercice EN_COURS
+            # → Compter depuis sa session d'inscription (logique originale)
+            sessions_membre = Session.objects.filter(
+                exercice=exercice_actuel,
+                date_session__gte=membre.session_inscription.date_session,
+                statut__in=['TERMINEE', 'EN_COURS']
+            ).order_by('date_session')
+            
+            nombre_sessions = sessions_membre.count()
+            
+            if nombre_sessions >= 3:
+                print(
+                    f"✅ Membre {membre.numero_membre} (inscrit cet exercice) : "
+                    f"{nombre_sessions} sessions → Statut définissable"
+                )
+                return True
+            else:
+                print(
+                    f"⏳ Membre {membre.numero_membre} (inscrit cet exercice) : "
+                    f"{nombre_sessions} session(s) → Statut NON définissable"
+                )
+                return False
+        else:
+            # ✅ CAS 2: Le membre s'est inscrit dans un exercice ANTÉRIEUR
+            # → Compter UNIQUEMENT les sessions de l'exercice EN_COURS
+            # (car son statut a été réinitialisé au changement d'exercice)
+            sessions_membre = Session.objects.filter(
+                exercice=exercice_actuel,
+                statut__in=['TERMINEE', 'EN_COURS']
+            ).order_by('date_session')
+            
+            nombre_sessions = sessions_membre.count()
+            
+            if nombre_sessions >= 3:
+                print(
+                    f"✅ Membre {membre.numero_membre} (ancien) : "
+                    f"{nombre_sessions} sessions du nouvel exercice → Statut définissable"
+                )
+                return True
+            else:
+                print(
+                    f"⏳ Membre {membre.numero_membre} (ancien) : "
+                    f"{nombre_sessions} session(s) du nouvel exercice → Statut NON définissable"
+                )
+                return False
+
+
+
+    def update_inscription_terminee(self):
+        """
+        ✅ NOUVELLE MÉTHODE <-
+        Met à jour automatiquement le statut inscription_terminee
+        """
+        from transactions.models import PaiementInscription
+        from decimal import Decimal
+        
+        # Récupérer le premier paiement pour avoir le montant initial
+        premier_paiement = PaiementInscription.objects.filter(
+            membre=self
+        ).order_by('date_paiement').first()
+        
+        if not premier_paiement:
+            self.inscription_terminee = False
+            return False
+        
+        # Montant total dû (depuis le premier paiement)
+        montant_total_du = premier_paiement.montant_inscription_du
+        
+        # Montant total payé
+        total_paye = PaiementInscription.objects.filter(
+            membre=self
+        ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+        
+        # Vérifier si inscription terminée
+        ancien_statut = self.inscription_terminee
+        self.inscription_terminee = (total_paye >= montant_total_du)
+        
+        if ancien_statut != self.inscription_terminee:
+            print(f"🎓 Inscription {self.numero_membre}: {ancien_statut} → {self.inscription_terminee}")
+        
+        return self.inscription_terminee
+            
         
 
 
