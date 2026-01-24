@@ -51,7 +51,7 @@ class ExerciceSerializer(serializers.ModelSerializer):
 
 class SessionSerializer(serializers.ModelSerializer):
     """
-    Serializer pour les sessions
+    Serializer pour les sessions avec transition automatique
     """
     exercice_nom = serializers.CharField(source='exercice.nom', read_only=True)
     is_en_cours = serializers.ReadOnlyField()
@@ -67,21 +67,45 @@ class SessionSerializer(serializers.ModelSerializer):
             'nombre_membres_inscrits', 'total_solidarite_collectee',
             'renflouements_generes', 'date_creation', 'date_modification'
         ]
+
+    def validate(self, attrs):
+        """
+        Logique de transition : clôture l'ancienne session avant de valider la nouvelle.
+        """
+        statut = attrs.get('statut', 'EN_COURS')
+        exercice = attrs.get('exercice')
+
+        # Si on crée une nouvelle session (pas d'ID encore) en mode EN_COURS
+        if not self.instance and statut == 'EN_COURS' and exercice:
+            # On cherche l'ancienne session en cours pour cet exercice
+            # On utilise .update() car cela ne déclenche pas les signaux/clean
+            # et libère immédiatement la contrainte UniqueConstraint en DB.
+            Session.objects.filter(
+                exercice=exercice, 
+                statut='EN_COURS'
+            ).update(statut='TERMINEE')
+            
+        return super().validate(attrs)
     
     def get_nombre_membres_inscrits(self, obj):
-        return obj.nouveaux_membres.count()
+        # Utilisation de getattr pour éviter les erreurs si la relation n'existe pas
+        return getattr(obj, 'nouveaux_membres', Session.objects.none()).count()
     
     def get_total_solidarite_collectee(self, obj):
         from transactions.models import PaiementSolidarite
+        from django.db.models import Sum
+        from decimal import Decimal
         total = PaiementSolidarite.objects.filter(session=obj).aggregate(
-            total=models.Sum('montant'))['total'] or Decimal('0')
+            total=Sum('montant'))['total'] or Decimal('0')
         return total
     
     def get_renflouements_generes(self, obj):
+        from django.db.models import Sum
+        from decimal import Decimal
         total = obj.renflouements.aggregate(
-            total=models.Sum('montant_du'))['total'] or Decimal('0')
+            total=Sum('montant_du'))['total'] or Decimal('0')
         return total
-
+    
 class TypeAssistanceSerializer(serializers.ModelSerializer):
     """
     Serializer pour les types d'assistance

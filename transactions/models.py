@@ -4,7 +4,7 @@ from django.conf import settings
 from decimal import Decimal, ROUND_HALF_UP
 import uuid
 from django.db import transaction
-from core.models import Membre, Session, Exercice, TypeAssistance,Interet,FondSocial
+from core.models import Membre, Session, Exercice, TypeAssistance,Interet,FondsSocial
 from decimal import Decimal, ROUND_HALF_UP
 from django.db.models import Sum, Q
 from django.utils import timezone
@@ -533,7 +533,6 @@ class Remboursement(models.Model):
     date_remboursement = models.DateTimeField(auto_now_add=True, verbose_name="Date de remboursement")
     notes = models.TextField(blank=True, verbose_name="Notes")
     
-    # Champs pour la redistribution des intérêts
     montant_capital = models.DecimalField(
         max_digits=12, decimal_places=2, default=0,
         verbose_name="Part capital du remboursement"
@@ -552,34 +551,50 @@ class Remboursement(models.Model):
         return f"{self.emprunt.membre.numero_membre} - {self.montant:,.0f} FCFA ({self.date_remboursement.date()})"
     
     def save(self, *args, **kwargs):
-        # Calcul automatique de la répartition capital/intérêt
+        # Déterminer si c'est une création avant de sauvegarder
+        is_new = self._state.adding
+        
+        # 1. Garder ta logique de calcul capital/intérêt
         if not self.montant_capital and not self.montant_interet:
             self._calculer_repartition_capital_interet()
         
+        # 2. Sauvegarde standard
         super().save(*args, **kwargs)
         
-        
-        
-        # Mise à jour du montant remboursé de l'emprunt
+        # 3. Garder ta mise à jour de l'emprunt
         self.emprunt.montant_rembourse = sum(
             r.montant for r in self.emprunt.remboursements.all()
         )
         self.emprunt.save()
+
+        # 4. AJOUT : Création de la ligne dans EpargneTransaction pour le Trésor
+        if is_new:
+            try:
+                # Import local pour éviter les erreurs d'import circulaire
+                from .models import EpargneTransaction
+                
+                EpargneTransaction.objects.create(
+                    membre=self.emprunt.membre,
+                    session=self.session,
+                    montant=self.montant,
+                    type_transaction='RETOUR_REMBOURSEMENT',
+                    notes=f"Auto: Retour de fonds (Remboursement prêt #{self.emprunt.id})",
+                    date_transaction=self.date_remboursement
+                )
+                print(f"💰 Trésor mis à jour : +{self.montant} FCFA")
+            except Exception as e:
+                print(f"❌ Erreur création EpargneTransaction: {e}")
+
+        # 5. Garder ta logique de statut membre
         try:
             from core.models import Membre
-            peut_definir_statuts = Membre.peut_definir_statuts_membre(membre=self.emprunt.membre)
-            
-            if peut_definir_statuts and self.emprunt.membre.calculer_statut_en_regle():
+            if self.emprunt.membre.calculer_statut_en_regle():
                 self.emprunt.membre.statut = 'EN_REGLE'
                 self.emprunt.membre.save()
         except Exception as e:
             print(f"Erreur de calcul de statut en règle: {e}")
             pass
-        
-        # Redistribution des intérêts aux membres
-        if self.montant_interet > 0:
-            self._redistribuer_interets()
-    
+
     def _calculer_repartition_capital_interet(self):
         """Calcule la répartition entre capital et intérêt du remboursement"""
         emprunt = self.emprunt
@@ -593,7 +608,6 @@ class Remboursement(models.Model):
         else:
             self.montant_capital = capital_restant
             self.montant_interet = self.montant - capital_restant
-    
     
 
 class AssistanceAccordee(models.Model):

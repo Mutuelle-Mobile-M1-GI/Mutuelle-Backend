@@ -95,22 +95,9 @@ class EpargneTransactionSerializer(serializers.ModelSerializer):
         ]
     
     def create(self, validated_data):
-        """
-        Crée un paiement de solidarité en remplissant montant_solidarite_du
-        """
-        from core.models import ConfigurationMutuelle
-        
-        # Récupérer la configuration pour le montant de solidarité
-        config = ConfigurationMutuelle.get_configuration()
-        
-        # Ajouter le montant dû (sera aussi rempli dans le save() du modèle)
-        validated_data['montant_solidarite_du'] = config.montant_solidarite
-        
-        print(f"💰 Création paiement solidarité: montant_solidarite_du = {validated_data['montant_solidarite_du']}")
-        
-        # Créer l'instance
+        # On supprime simplement la logique de solidarité qui n'appartient pas à l'épargne
+        # ou on s'assure qu'elle ne bloque pas la création.
         return super().create(validated_data)
-
 
 class EmpruntSerializer(serializers.ModelSerializer):
     """
@@ -210,7 +197,20 @@ class EmpruntSerializer(serializers.ModelSerializer):
             return []
 
 
+class TopEpargnantSerializer(serializers.Serializer):
+    """Serializer pour afficher les membres dans le Top Epargne"""
+    nom_complet = serializers.CharField(source='utilisateur.nom_complet')
+    numero_membre = serializers.CharField()
+    epargne_reelle = serializers.SerializerMethodField()
 
+    def get_epargne_reelle(self, obj):
+        # On ne prend QUE les types qui sont de l'épargne positive
+        types_valides = ['DEPOT', 'AJOUT_INTERET', 'RETOUR_REMBOURSEMENT']
+        total = obj.transactions_epargne.filter(
+            type_transaction__in=types_valides
+        ).aggregate(total=models.Sum('montant'))['total'] or Decimal('0')
+        return total
+    
 class RemboursementSerializer(serializers.ModelSerializer):
     """
     Serializer pour les remboursements
@@ -310,7 +310,10 @@ class StatistiquesTransactionsSerializer(serializers.Serializer):
     """
     inscriptions = serializers.DictField()
     solidarites = serializers.DictField()
-    epargnes = serializers.DictField()
+    # Cette partie doit être alimentée par une logique filtrée dans la View
+    epargnes = serializers.DictField() 
     emprunts = serializers.DictField()
     assistances = serializers.DictField()
     renflouements = serializers.DictField()
+    # Ajoute ceci pour le classement
+    top_epargnants = TopEpargnantSerializer(many=True, read_only=True)

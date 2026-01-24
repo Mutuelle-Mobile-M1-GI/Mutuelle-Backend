@@ -42,6 +42,7 @@ class Utilisateur(AbstractUser):
         return f"{self.first_name} {self.last_name}"
     
     @property
+    def is_membre(self):  # Ajout du nom de la fonction ici
         return self.role == 'MEMBRE'
     
     @property
