@@ -313,6 +313,86 @@ class EpargneTransactionViewSet(viewsets.ModelViewSet):
     ordering_fields = ['date_transaction', 'montant', 'type_transaction']
     ordering = ['-date_transaction']
     permission_classes = [AllowAny]
+    
+    @action(detail=False, methods=['get'], permission_classes=[AllowAny])
+    def statistiques(self, request):
+        try:
+            # 1. LOGIQUE ÉPARGNE (Fonds propres des membres)
+            # Uniquement ce qui appartient au membre
+            TYPES_EPARGNE = ['DEPOT', 'AJOUT_INTERET']
+            
+            # 2. LOGIQUE TRÉSORERIE (Flux de caisse)
+            # Inclut les remboursements qui reviennent dans le coffre
+            TYPES_ENTREES_TRESOR = ['DEPOT', 'AJOUT_INTERET', 'RETOUR_REMBOURSEMENT']
+
+            # 3. Calcul de l'Épargne Totale Globale (Dette de la mutuelle envers les membres)
+            total_epargne = EpargneTransaction.objects.filter(
+                type_transaction__in=TYPES_EPARGNE,
+                montant__gt=0
+            ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+
+            # 4. Calcul du Trésor Total (Cash réellement présent dans le coffre)
+            # On additionne les entrées (+) et les sorties (déjà stockées en -)
+            total_entrees = EpargneTransaction.objects.filter(
+                type_transaction__in=TYPES_ENTREES_TRESOR,
+                montant__gt=0
+            ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+            
+            total_sorties = EpargneTransaction.objects.filter(
+                type_transaction='RETRAIT_PRET',
+                montant__lt=0  # Sécurité : on prend les montants négatifs
+            ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+            
+            # Trésor = Entrées (ex: 1M) + Sorties (ex: -485k) = 515k
+            tresor_total = total_entrees + total_sorties
+
+            # 5. Top 5 Épargnants (Basé UNIQUEMENT sur l'épargne réelle + intérêts perçus)
+            # Ici, le membre qui a emprunté 500k reste à 300k (son épargne initiale)
+            top_membres = Membre.objects.annotate(
+                effort_epargne=Sum(
+                    'transactions_epargne__montant',
+                    filter=Q(
+                        transactions_epargne__type_transaction__in=TYPES_EPARGNE,
+                        transactions_epargne__montant__gt=0
+                    )
+                )
+            ).filter(effort_epargne__gt=0).order_by('-effort_epargne')[:5]
+
+            # 6. Formatage des données pour le Frontend
+            top_epargnants_data = []
+            for m in top_membres:
+                nom = "Membre Inconnu"
+                if m.utilisateur:
+                    nom = getattr(m.utilisateur, 'nom_complet', 
+                        f"{m.utilisateur.first_name} {m.utilisateur.last_name}".strip())
+                
+                top_epargnants_data.append({
+                    "nom": nom,
+                    "montant": m.effort_epargne,  # 300 000 + intérêts (Correct)
+                    "numero": m.numero_membre
+                })
+
+            # 7. Autres stats utiles
+            maintenant = timezone.now()
+            transactions_mois = EpargneTransaction.objects.filter(
+                date_transaction__month=maintenant.month,
+                date_transaction__year=maintenant.year
+            ).count()
+
+            return Response({
+                "epargne_totale": total_epargne,    # Somme des dépôts membres
+                "tresor_total": tresor_total,      # Cash disponible en caisse
+                "top_epargnants": top_epargnants_data,
+                "total_membres": Membre.objects.count(),
+                "transactions_ce_mois": transactions_mois
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            return Response(
+                {"error": "Erreur lors du calcul des stats", "details": str(e)}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+            
 
 class EmpruntFilter(filters.FilterSet):
     """
@@ -726,61 +806,8 @@ class EmpruntViewSet(viewsets.ModelViewSet):
             import traceback
             print(f"❌ PERFORM_CREATE - Traceback: {traceback.format_exc()}")
             raise
-
-    @action(detail=False, methods=['get'], permission_classes=[AllowAny])
-    def statistiques(self, request):
-        """
-        Statistiques des emprunts avec gestion d'erreurs
-        """
-        print("🔍 STATISTIQUES EMPRUNTS - Début")
-        try:
-            queryset = self.get_queryset()
-            
-            total_emprunts = queryset.count()
-            emprunts_en_cours = queryset.filter(statut='EN_COURS').count()
-            emprunts_rembourses = queryset.filter(statut='REMBOURSE').count()
-            emprunts_en_retard = queryset.filter(statut='EN_RETARD').count()
-            
-            montant_total_emprunte = queryset.aggregate(
-                total=Sum('montant_emprunte'))['total'] or Decimal('0')
-            montant_total_a_rembourser = queryset.aggregate(
-                total=Sum('montant_total_a_rembourser'))['total'] or Decimal('0')
-            montant_total_rembourse = queryset.aggregate(
-                total=Sum('montant_rembourse'))['total'] or Decimal('0')
-            
-            print(f"✅ Statistiques calculées:")
-            print(f"   - Total emprunts: {total_emprunts}")
-            print(f"   - En cours: {emprunts_en_cours}")
-            print(f"   - Remboursés: {emprunts_rembourses}")
-            print(f"   - En retard: {emprunts_en_retard}")
-            
-            return Response({
-                'nombre_emprunts': {
-                    'total': total_emprunts,
-                    'en_cours': emprunts_en_cours,
-                    'rembourses': emprunts_rembourses,
-                    'en_retard': emprunts_en_retard
-                },
-                'montants': {
-                    'total_emprunte': montant_total_emprunte,
-                    'total_a_rembourser': montant_total_a_rembourser,
-                    'total_rembourse': montant_total_rembourse,
-                    'solde_restant': montant_total_a_rembourser - montant_total_rembourse
-                },
-                'pourcentages': {
-                    'taux_remboursement_global': (montant_total_rembourse / montant_total_a_rembourser * 100) if montant_total_a_rembourser > 0 else 0
-                }
-            })
-            
-        except Exception as e:
-            print(f"❌ ERREUR STATISTIQUES: {e}")
-            return Response({
-                'error': 'Erreur lors du calcul des statistiques',
-                'details': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-
+        
+    
 class RenflouementFilter(filters.FilterSet):
     """
     Filtres pour les renflouements
