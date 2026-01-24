@@ -19,6 +19,8 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework.response import Response
 from rest_framework import status
+from django.db.models import Sum, Q, DecimalField
+from django.db.models.functions import Coalesce  # <--- C'est cette ligne qu'il te manque
 
 logger = logging.getLogger(__name__)
 
@@ -346,45 +348,47 @@ class EpargneTransactionViewSet(viewsets.ModelViewSet):
             # Trésor = Entrées (ex: 1M) + Sorties (ex: -485k) = 515k
             tresor_total = total_entrees + total_sorties
 
-            # 5. Top 5 Épargnants (Basé UNIQUEMENT sur l'épargne réelle + intérêts perçus)
-            # Ici, le membre qui a emprunté 500k reste à 300k (son épargne initiale)
-            top_membres = Membre.objects.annotate(
-                effort_epargne=Sum(
-                    'transactions_epargne__montant',
-                    filter=Q(
-                        transactions_epargne__type_transaction__in=TYPES_EPARGNE,
-                        transactions_epargne__montant__gt=0
-                    )
+            tous_les_membres_query = Membre.objects.annotate(
+                total_cumule=Coalesce(
+                    Sum(
+                        'transactions_epargne__montant',
+                        filter=Q(
+                            transactions_epargne__type_transaction__in=TYPES_EPARGNE,
+                            transactions_epargne__montant__gt=0
+                        )
+                    ),
+                    Decimal('0'),
+                    output_field=DecimalField()
                 )
-            ).filter(effort_epargne__gt=0).order_by('-effort_epargne')[:5]
+            ).select_related('utilisateur').order_by('-total_cumule')
 
-            # 6. Formatage des données pour le Frontend
-            top_epargnants_data = []
-            for m in top_membres:
+            membres_data = []
+            for m in tous_les_membres_query:
+                # Gestion du nom
                 nom = "Membre Inconnu"
                 if m.utilisateur:
-                    nom = getattr(m.utilisateur, 'nom_complet', 
-                        f"{m.utilisateur.first_name} {m.utilisateur.last_name}".strip())
-                
-                top_epargnants_data.append({
+                    nom = getattr(m.utilisateur, 'nom_complet', None) or \
+                          f"{m.utilisateur.first_name} {m.utilisateur.last_name}".strip() or \
+                          m.utilisateur.username
+
+                membres_data.append({
+                    "id": m.id,
                     "nom": nom,
-                    "montant": m.effort_epargne,  # 300 000 + intérêts (Correct)
-                    "numero": m.numero_membre
+                    "montant": float(m.total_cumule), # Somme DEPOT + INTERET
+                    "numero": m.numero_membre,
+                    "statut": str(m.statut) # Convertit le statut (ex: NON_DEFINI) en texte
                 })
 
-            # 7. Autres stats utiles
-            maintenant = timezone.now()
-            transactions_mois = EpargneTransaction.objects.filter(
-                date_transaction__month=maintenant.month,
-                date_transaction__year=maintenant.year
-            ).count()
-
             return Response({
-                "epargne_totale": total_epargne,    # Somme des dépôts membres
-                "tresor_total": tresor_total,      # Cash disponible en caisse
-                "top_epargnants": top_epargnants_data,
-                "total_membres": Membre.objects.count(),
-                "transactions_ce_mois": transactions_mois
+                "epargne_totale": float(total_epargne),
+                "tresor_total": float(tresor_total),
+                "tous_les_membres": membres_data, # Liste pour l'onglet Membres
+                "top_epargnants": membres_data[:5], # Les 5 meilleurs pour l'Overview
+                "total_membres": len(membres_data),
+                "transactions_ce_mois": EpargneTransaction.objects.filter(
+                    date_transaction__month=timezone.now().month,
+                    date_transaction__year=timezone.now().year
+                ).count()
             }, status=status.HTTP_200_OK)
 
         except Exception as e:
