@@ -711,7 +711,7 @@ class AssistanceAccordee(models.Model):
         """Crée les renflouements pour tous les membres"""
         # Prendre les membres qui étaient en règle AVANT le paiement de l'assistance
         membres_en_regle = Membre.objects.filter(
-            date_inscription__lte=self.date_session
+            date_inscription__lte=self.session.date_session
         )
         
         nombre_membres = membres_en_regle.count()
