@@ -734,14 +734,14 @@ class AssistanceAccordee(models.Model):
             )
             
             renflouements_crees += 1
-            try:
-                if Membre.peut_definir_statuts_membre(membre=membre):
-                    membre.statut='NON_EN_REGLE'
-                    membre.save()
-            except Exception as e:
-                print(f"Echec de la MAJ du statut du membre : {e}")
+            # try:
+            #     if Membre.peut_definir_statuts_membre(membre=membre):
+            #         membre.statut='NON_EN_REGLE'
+            #         membre.save()
+            # except Exception as e:
+            #     print(f"Echec de la MAJ du statut du membre : {e}")
                 
-                pass
+            #     pass
         
         print(f"Renflouement créé: {renflouements_crees} membres - {montant_par_membre:,.0f} FCFA chacun")
 
