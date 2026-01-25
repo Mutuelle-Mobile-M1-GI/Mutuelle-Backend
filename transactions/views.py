@@ -976,6 +976,104 @@ class AssistanceAccordeeViewSet(viewsets.ModelViewSet):
     ordering = ['-date_demande']
     permission_classes = [AllowAny]
 
+    @action(detail=False, methods=['get'], permission_classes=[AllowAny])
+    def par_membre(self, request):
+        """
+        Récupère toutes les assistances accordées à un membre spécifique
+        Paramètre query: membre_id (UUID)
+        """
+        membre_id = request.query_params.get('membre_id')
+        
+        if not membre_id:
+            return Response(
+                {'error': 'Le paramètre membre_id est requis'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            membre = Membre.objects.get(id=membre_id)
+        except Membre.DoesNotExist:
+            return Response(
+                {'error': f'Membre avec l\'ID {membre_id} non trouvé'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Récupérer toutes les assistances du membre
+        assistances = AssistanceAccordee.objects.filter(
+            membre=membre
+        ).select_related('type_assistance', 'session').order_by('-date_demande')
+        
+        # Calculer les statistiques
+        total_assistances = assistances.count()
+        montant_total = assistances.aggregate(total=Sum('montant'))['total'] or Decimal('0')
+        
+        # Grouper par type d'assistance
+        assistances_par_type = {}
+        for assistance in assistances:
+            type_nom = assistance.type_assistance.nom
+            if type_nom not in assistances_par_type:
+                assistances_par_type[type_nom] = {
+                    'type': type_nom,
+                    'montant_total': Decimal('0'),
+                    'nombre': 0,
+                    'assistances': []
+                }
+            
+            assistances_par_type[type_nom]['montant_total'] += assistance.montant
+            assistances_par_type[type_nom]['nombre'] += 1
+            assistances_par_type[type_nom]['assistances'].append({
+                'id': str(assistance.id),
+                'montant': float(assistance.montant),
+                'type_assistance': assistance.type_assistance.nom,
+                'session': assistance.session.nom if assistance.session else None,
+                'date_demande': assistance.date_demande,
+                'date_paiement': assistance.date_paiement,
+                'statut': assistance.statut,
+                'justification': assistance.justification,
+                'notes': assistance.notes
+            })
+        
+        # Convertir les montants en float pour le JSON
+        for type_data in assistances_par_type.values():
+            type_data['montant_total'] = float(type_data['montant_total'])
+        
+        # Grouper par statut
+        assistances_par_statut = {}
+        for assistance in assistances:
+            statut = assistance.get_statut_display()
+            if statut not in assistances_par_statut:
+                assistances_par_statut[statut] = {
+                    'statut': statut,
+                    'montant_total': Decimal('0'),
+                    'nombre': 0
+                }
+            
+            assistances_par_statut[statut]['montant_total'] += assistance.montant
+            assistances_par_statut[statut]['nombre'] += 1
+        
+        # Convertir les montants en float pour le JSON
+        for statut_data in assistances_par_statut.values():
+            statut_data['montant_total'] = float(statut_data['montant_total'])
+        
+        # Sérialiser les assistances
+        serializer = self.get_serializer(assistances, many=True)
+        
+        return Response({
+            'membre': {
+                'id': str(membre.id),
+                'numero_membre': membre.numero_membre,
+                'nom_complet': membre.utilisateur.nom_complet if membre.utilisateur else 'Inconnu',
+                'email': membre.utilisateur.email if membre.utilisateur else None
+            },
+            'statistiques': {
+                'total_assistances': total_assistances,
+                'montant_total': float(montant_total),
+                'assistances_par_type': assistances_par_type,
+                'assistances_par_statut': assistances_par_statut
+            },
+            'assistances': serializer.data
+        }, status=status.HTTP_200_OK)
+
     def create(self, request, *args, **kwargs):
         print("ASSISTANCE CREATE - Data reçue:", request.data)
         

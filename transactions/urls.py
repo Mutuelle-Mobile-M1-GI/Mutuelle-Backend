@@ -13,11 +13,16 @@ router.register(r'renflouements', views.RenflouementViewSet)
 router.register(r'paiements-renflouement', views.PaiementRenflouementViewSet)
 
 urlpatterns = [
-    # 1. On intercepte l'URL des statistiques AVANT que le router ne cherche un ID
+    # 1. On intercepte l'URL des statistiques d'épargne AVANT que le router ne cherche un ID
     path('epargne-transactions/statistiques/', 
         views.EpargneTransactionViewSet.as_view({'get': 'statistiques'}), 
         name='epargne-stats'),
     
-    # 2. On inclut le reste des routes automatiques
+    # 2. On intercepte l'URL pour récupérer les assistances par membre
+    path('assistances/par_membre/', 
+        views.AssistanceAccordeeViewSet.as_view({'get': 'par_membre'}), 
+        name='assistances-par-membre'),
+    
+    # 3. On inclut le reste des routes automatiques
     path('', include(router.urls)),
 ]

@@ -1,7 +1,53 @@
 from rest_framework import serializers
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.contrib.auth import authenticate
 from .models import Utilisateur
 from core.models import Membre
+
+
+class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
+    """
+    Sérialiseur personnalisé pour l'authentification JWT utilisant l'email
+    """
+    username_field = 'email'
+
+    @classmethod
+    def get_token(cls, user):
+        token = super().get_token(user)
+        token['email'] = user.email
+        token['nom_complet'] = user.nom_complet
+        token['role'] = user.role
+        return token
+
+    def validate(self, attrs):
+        # Remplacer 'username' par 'email' pour l'authentification
+        data = {}
+        email = attrs.get('email')
+        password = attrs.get('password')
+
+        if email and password:
+            try:
+                user = Utilisateur.objects.get(email=email)
+            except Utilisateur.DoesNotExist:
+                msg = ('Le compte avec cet email n\'existe pas.')
+                raise serializers.ValidationError(msg, code='authorization')
+
+            if not user.check_password(password):
+                msg = ('Le mot de passe est incorrect.')
+                raise serializers.ValidationError(msg, code='authorization')
+
+            if not user.is_active:
+                msg = ('Ce compte est désactivé.')
+                raise serializers.ValidationError(msg, code='authorization')
+
+            refresh = self.get_token(user)
+            data['refresh'] = str(refresh)
+            data['access'] = str(refresh.access_token)
+            return data
+        else:
+            msg = ('Doit inclure les champs "email" et "password".')
+            raise serializers.ValidationError(msg, code='authorization')
+
 
 class UtilisateurSerializer(serializers.ModelSerializer):
     """
