@@ -266,7 +266,7 @@ def calculer_donnees_membre_completes(membre):
     
     if not peut_definir_statuts:
         # Avant 3 sessions, on ne définit pas les statuts
-        en_regle = 'NON_DEFINI'  # Statut indéterminé
+        en_regle = False  # Statut indéterminé
         print(f"⏳ Membre {membre.numero_membre}: Statut non défini (< 3 sessions)")
     else:
         # Après 3 sessions, on applique les règles normales
