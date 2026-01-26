@@ -477,30 +477,85 @@ class Session(models.Model):
                 raise ValidationError("On ne peut pas réouvrir une session terminée.")
 
     def save(self, *args, **kwargs):
+        old_statut = None
         is_new = self.pk is None
         
-        # 1. Gestion automatique du nom et de l'exercice (ton code actuel est bon)
+        # 1. Gestion automatique du nom et de l'exercice
         if not self.nom:
-            # ... (garde ton code de génération de nom ici)
-            pass
+            if self.date_session:
+                mois_fr = [
+                    "Janvier", "Février", "Mars", "Avril", "Mai", "Juin",
+                    "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre"
+                ]
+                mois = mois_fr[self.date_session.month - 1]
+                self.nom = f"Session {mois} {self.date_session.year}"
+            else:
+                from django.utils import timezone
+                now = timezone.now()
+                self.nom = f"Session {now.strftime('%B %Y')}"
+        
+        # ✅ Obtenir l'ancien statut SEULEMENT si l'instance existe déjà
+        if not is_new:
+            try:
+                old_instance = Session.objects.get(pk=self.pk)
+                old_statut = old_instance.statut
+            except Session.DoesNotExist:
+                is_new = True
+                old_statut = None
             
-        if not self.exercice:
-            # ... (garde ton code d'attribution d'exercice ici)
-            pass
+        # ✅ Assigner l'exercice en cours si pas spécifié
+        if not self.exercice_id and not self.exercice:
+            exercice_en_cours = Exercice.get_exercice_en_cours()
+            if exercice_en_cours:
+                self.exercice = exercice_en_cours
+            else:
+                from datetime import date
+                exercice, created = Exercice.objects.get_or_create(
+                    statut='EN_COURS',
+                    defaults={
+                        'nom': f'Exercice {date.today().year}',
+                        'date_debut': date.today(),
+                        'statut': 'EN_COURS'
+                    }
+                )
+                self.exercice = exercice
+        
+        # ✅ VÉRIFIER SI C'EST LA PREMIÈRE SESSION (table vide)
+        is_first_session = Session.objects.count() == 0
+        
+        if is_first_session:
+            print(f"⚠️ PREMIÈRE SESSION DE LA TABLE : Pas de traitement de collation")
+        
+        # ✅ VÉRIFIER LE FONDS SOCIAL AVANT DE COMMENCER LA TRANSACTION
+        # Si la collation est > 0 ET ce n'est pas la première session, on vérifie AVANT de créer quoi que ce soit
+        if is_new and self.statut == 'EN_COURS' and self.montant_collation > 0 and not is_first_session:
+            from core.models import FondsSocial
+            
+            fonds = FondsSocial.get_fonds_actuel()
+            if not fonds:
+                raise ValidationError(
+                    "❌ IMPOSSIBLE DE CRÉER LA SESSION : Aucun fonds social actuel trouvé"
+                )
+            
+            if fonds.montant_total < self.montant_collation:
+                raise ValidationError(
+                    f"❌ IMPOSSIBLE DE CRÉER LA SESSION : Fonds social insuffisant."
+                    f"   Disponible : {fonds.montant_total:,.0f} FCFA"
+                    f"   Nécessaire : {self.montant_collation:,.0f} FCFA"
+                    f"   Manque : {self.montant_collation - fonds.montant_total:,.0f} FCFA"
+                )
+            
+            print(f"✅ Vérification fonds social OK : {fonds.montant_total:,.0f} FCFA disponible")
 
         # 2. TRANSACTION ATOMIQUE POUR LA TRANSITION
         with transaction.atomic():
+            # Récupérer la session précédente AVANT de la modifier
+            previous = None
             if is_new and self.statut == 'EN_COURS':
-                # On cherche l'ancienne session EN_COURS
                 previous = Session.objects.filter(
                     exercice=self.exercice, 
                     statut='EN_COURS'
                 ).exclude(pk=self.pk).first()
-                
-                if previous:
-                    # On la ferme de force (pas de clean() ici pour éviter les boucles)
-                    Session.objects.filter(pk=previous.pk).update(statut='TERMINEE')
-                    print(f"✅ Session précédente {previous.nom} clôturée automatiquement.")
 
             # 3. Vérification du fonds social (ton code actuel)
             # ... (garde tes vérifications de collation ici)
@@ -509,9 +564,24 @@ class Session(models.Model):
             super().save(*args, **kwargs)
             
             # 5. Traitement post-sauvegarde (Renflouements, etc.)
-            if is_new and self.statut == 'EN_COURS' and self.montant_collation > 0:
-                self._creer_renflouement_collation()
-                self._retirer_collation_fonds_social()
+            if is_new and self.statut == 'EN_COURS' and self.montant_collation > 0 and not is_first_session:
+                # 1. Créer les renflouements D'ABORD
+                if not self._creer_renflouement_collation():
+                    raise ValidationError(
+                        "❌ ÉCHEC : Impossible de créer les renflouements de collation"
+                    )
+                
+                # 2. Retirer du fonds social ENSUITE
+                if not self._retirer_collation_fonds_social():
+                    raise ValidationError(
+                        "❌ ÉCHEC : Impossible de retirer la collation du fonds social"
+                    )
+            
+            # 6. MARQUER LA SESSION PRÉCÉDENTE COMME TERMINEE SEULEMENT APRÈS SUCCÈS
+            # (Tout s'est bien passé, on peut fermer l'ancienne session en toute sécurité)
+            if is_new and self.statut == 'EN_COURS' and previous:
+                Session.objects.filter(pk=previous.pk).update(statut='TERMINEE')
+                print(f"✅ Session précédente {previous.nom} clôturée automatiquement.")
         
         # 6. Mise à jour des membres
         self.mettre_a_jour_statuts_membres()
@@ -787,7 +857,6 @@ class Membre(models.Model):
 
         return True, f"Emprunt autorisé (max: {int(montant_max):,} FCFA)"
 
-    # ... reste de ton code Membre inchangé ...
 
     
     def calculer_statut_en_regle(self):
