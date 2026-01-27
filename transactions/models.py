@@ -678,15 +678,16 @@ class AssistanceAccordee(models.Model):
         """
         Traite le paiement d'une assistance:
         1. Prélève du fonds social
-        2. Crée les renflouements pour tous les membres en règle
+        2. Enregistre la dépense (sans créer de renflouement)
+        ✅ NOUVEAU: Les renflouements sont créés à la fin de l'exercice
         """
-        from core.models import FondsSocial
+        from core.models import FondsSocial, DépenseExercice
         from django.utils import timezone
         
         # 1. PRÉLEVER DU FONDS SOCIAL
         fonds = FondsSocial.get_fonds_actuel()
         if not fonds:
-            print("ERREUR: Aucun fonds social actuel trouvé")
+            print("❌ ERREUR: Aucun fonds social actuel trouvé")
             return
         
         # Vérifier si le fonds a assez d'argent
@@ -694,7 +695,7 @@ class AssistanceAccordee(models.Model):
             self.montant,
             f"Assistance {self.type_assistance.nom} pour {self.membre.numero_membre}"
         ):
-            print(f"ERREUR: Fonds social insuffisant pour l'assistance de {self.montant:,.0f} FCFA")
+            print(f"❌ ERREUR: Fonds social insuffisant pour l'assistance de {self.montant:,.0f} FCFA")
             return
         
         # Mettre à jour la date de paiement
@@ -702,48 +703,27 @@ class AssistanceAccordee(models.Model):
             self.date_paiement = timezone.now()
             super().save(update_fields=['date_paiement'])
         
-        # 2. CRÉER LES RENFLOUEMENTS
-        self._creer_renflouement()
+        # 2. ENREGISTRER LA DÉPENSE (pour calculer les renflouements à la fin)
+        try:
+            exercice = Exercice.get_exercice_en_cours()
+            if exercice:
+                DépenseExercice.objects.create(
+                    exercice=exercice,
+                    type_depense='ASSISTANCE',
+                    montant=self.montant,
+                    description=f"Assistance {self.type_assistance.nom} pour {self.membre.numero_membre}",
+                    session=self.session,
+                    beneficiaire=self.membre
+                )
+                print(f"   📋 Dépense enregistrée: {self.montant:,.0f} FCFA")
+            else:
+                print("⚠️  Aucun exercice EN_COURS pour enregistrer la dépense")
+        except Exception as e:
+            print(f"⚠️  Erreur lors de l'enregistrement de la dépense: {e}")
         
-        print(f"Assistance payée: {self.montant:,.0f} FCFA prélevés du fonds social")
-    
-    def _creer_renflouement(self):
-        """Crée les renflouements pour tous les membres"""
-        # Prendre les membres qui étaient en règle AVANT le paiement de l'assistance
-        membres_en_regle = Membre.objects.filter(
-            date_inscription__lte=self.session.date_session
-        )
-        
-        nombre_membres = membres_en_regle.count()
-        # if nombre_membres == 0:
-        #     print("ATTENTION: Aucun membre en règle pour le renflouement")
-        #     return
-        
-        montant_par_membre = (self.montant / nombre_membres).quantize(
-            Decimal('0.01'), rounding=ROUND_HALF_UP
-        )
-        
-        renflouements_crees = 0
-        for membre in membres_en_regle:
-            Renflouement.objects.create(
-                membre=membre,
-                session=self.session,
-                montant_du=montant_par_membre,
-                cause=f"Assistance {self.type_assistance.nom} pour {self.membre.numero_membre}",
-                type_cause='ASSISTANCE'
-            )
-            
-            renflouements_crees += 1
-            # try:
-            #     if Membre.peut_definir_statuts_membre(membre=membre):
-            #         membre.statut='NON_EN_REGLE'
-            #         membre.save()
-            # except Exception as e:
-            #     print(f"Echec de la MAJ du statut du membre : {e}")
-                
-            #     pass
-        
-        print(f"Renflouement créé: {renflouements_crees} membres - {montant_par_membre:,.0f} FCFA chacun")
+        print(f"✅ Assistance payée: {self.montant:,.0f} FCFA prélevés du fonds social")
+        print(f"   📋 Dépense enregistrée pour renflouement en fin d'exercice")
+
 
 class Renflouement(models.Model):
     """
@@ -752,6 +732,7 @@ class Renflouement(models.Model):
     TYPE_CAUSE_CHOICES = [
         ('ASSISTANCE', 'Assistance'),
         ('COLLATION', 'Collation'),
+        ('RENFLOUEMENT_FIN_EXERCICE', 'Renflouement fin d\'exercice'),
         ('AUTRE', 'Autre'),
     ]
     
@@ -769,7 +750,7 @@ class Renflouement(models.Model):
         verbose_name="Montant payé (FCFA)"
     )
     cause = models.TextField(verbose_name="Cause du renflouement",blank=True)
-    type_cause = models.CharField(max_length=15, choices=TYPE_CAUSE_CHOICES, verbose_name="Type de cause")
+    type_cause = models.CharField(max_length=40, choices=TYPE_CAUSE_CHOICES, verbose_name="Type de cause")
     date_creation = models.DateTimeField(auto_now_add=True, verbose_name="Date de création")
     date_derniere_modification = models.DateTimeField(auto_now=True)
     
