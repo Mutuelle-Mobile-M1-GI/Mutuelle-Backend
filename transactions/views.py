@@ -325,7 +325,8 @@ class EpargneTransactionViewSet(viewsets.ModelViewSet):
             
             # 2. LOGIQUE TRÉSORERIE (Flux de caisse)
             # Inclut les remboursements qui reviennent dans le coffre
-            TYPES_ENTREES_TRESOR = ['DEPOT', 'AJOUT_INTERET', 'RETOUR_REMBOURSEMENT']
+            TYPES_ENTREES_TRESOR = ['DEPOT', 'RETOUR_REMBOURSEMENT']
+            
 
             # 3. Calcul de l'Épargne Totale Globale (Dette de la mutuelle envers les membres)
             total_epargne = EpargneTransaction.objects.filter(

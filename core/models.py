@@ -476,7 +476,9 @@ class Session(models.Model):
             if was_terminée:
                 raise ValidationError("On ne peut pas réouvrir une session terminée.")
 
+
     def save(self, *args, **kwargs):
+<<<<<<< Updated upstream
         is_new = self.pk is None
         
         # 1. Gestion automatique du nom et de l'exercice (ton code actuel est bon)
@@ -487,9 +489,55 @@ class Session(models.Model):
         if not self.exercice:
             # ... (garde ton code d'attribution d'exercice ici)
             pass
+=======
+        from django.db import transaction
+        from django.core.exceptions import ValidationError
+        from decimal import Decimal
+        
+        old_statut = None
+        is_new = self.pk is None
+        print(f"DEBUG SAVE SESSION: is_new={is_new}, nom={self.nom}, statut={self.statut}")
 
-        # 2. TRANSACTION ATOMIQUE POUR LA TRANSITION
+        # 1. Gestion automatique du nom
+        if not self.nom:
+            if self.date_session:
+                mois_fr = ["Janvier", "Février", "Mars", "Avril", "Mai", "Juin", 
+                           "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre"]
+                self.nom = f"Session {mois_fr[self.date_session.month - 1]} {self.date_session.year}"
+            else:
+                from django.utils import timezone
+                self.nom = f"Session {timezone.now().strftime('%B %Y')}"
+    
+        # 2. Vérification instance existante
+        if not is_new:
+            try:
+                old_instance = Session.objects.get(pk=self.pk)
+                old_statut = old_instance.statut
+            except Session.DoesNotExist:
+                is_new = True
+        
+        # 3. Exercice par défaut
+        if not self.exercice_id and not self.exercice:
+            from .models import Exercice
+            exercice_en_cours = Exercice.get_exercice_en_cours()
+            self.exercice = exercice_en_cours
+>>>>>>> Stashed changes
+
+        # 4. Vérification Fonds Social
+        is_first_session = Session.objects.count() == 0
+        if is_new and self.statut == 'EN_COURS' and self.montant_collation > 0 and not is_first_session:
+            from .models import FondsSocial
+            fonds = FondsSocial.get_fonds_actuel()
+            if not fonds or fonds.montant_total < self.montant_collation:
+                raise ValidationError("❌ Fonds social insuffisant pour la collation.")
+
+        # 5. EXECUTION (Bloc Atomique)
         with transaction.atomic():
+<<<<<<< Updated upstream
+=======
+            # Identifier l'ancienne session à fermer
+            previous = None
+>>>>>>> Stashed changes
             if is_new and self.statut == 'EN_COURS':
                 # On cherche l'ancienne session EN_COURS
                 previous = Session.objects.filter(
@@ -502,19 +550,46 @@ class Session(models.Model):
                     Session.objects.filter(pk=previous.pk).update(statut='TERMINEE')
                     print(f"✅ Session précédente {previous.nom} clôturée automatiquement.")
 
-            # 3. Vérification du fonds social (ton code actuel)
-            # ... (garde tes vérifications de collation ici)
-
-            # 4. SAUVEGARDE
+            # Sauvegarde de la session actuelle
             super().save(*args, **kwargs)
+<<<<<<< Updated upstream
             
             # 5. Traitement post-sauvegarde (Renflouements, etc.)
             if is_new and self.statut == 'EN_COURS' and self.montant_collation > 0:
                 self._creer_renflouement_collation()
                 self._retirer_collation_fonds_social()
+=======
+>>>>>>> Stashed changes
         
-        # 6. Mise à jour des membres
-        self.mettre_a_jour_statuts_membres()
+            # Retrait collation
+            if is_new and self.statut == 'EN_COURS' and self.montant_collation > 0 and not is_first_session:
+                if hasattr(self, '_retirer_collation_fonds_social'):
+                    self._retirer_collation_fonds_social()
+        
+            # 6. Clôture précédente et Recalcul Intérêts
+            # On lance le scan si c'est une nouvelle session EN_COURS
+            if is_new and self.statut == 'EN_COURS':
+                if previous:
+                    Session.objects.filter(pk=previous.pk).update(statut='TERMINEE')
+                    print(f"✅ Session précédente {previous.nom} clôturée.")
+                
+                # --- DÉBUT CAPITALISATION ---
+                print("🚀 SCAN DES EMPRUNTS EN COURS...")
+                from transactions.models import Emprunt
+                # On récupère tous les emprunts non remboursés
+                emprunts_actifs = Emprunt.objects.exclude(statut='REMBOURSE')
+                
+                count_penalites = 0
+                for emprunt in emprunts_actifs:
+                    if emprunt.capitaliser_interets_retard():
+                        count_penalites += 1
+                
+                print(f"📊 FIN DU SCAN: {count_penalites} pénalités appliquées.")
+        
+        # 7. Mise à jour statuts membres
+        if hasattr(self, 'mettre_a_jour_statuts_membres'):
+            self.mettre_a_jour_statuts_membres()
+    
         
     def mettre_a_jour_statuts_membres(self):
         """
