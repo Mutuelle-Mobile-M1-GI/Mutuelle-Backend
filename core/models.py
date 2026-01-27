@@ -16,6 +16,36 @@ import re
 from django.db import models, transaction
 from django.core.exceptions import ValidationError
 
+class DépenseExercice(models.Model):
+    """
+    ✅ NOUVEAU: Enregistre les dépenses du fonds social durant l'exercice
+    
+    Chaque dépense (assistance, collation) crée une entrée ici.
+    À la fin de l'exercice, les renflouements sont créés selon ces dépenses.
+    """
+    TYPE_CHOICES = [
+        ('ASSISTANCE', 'Assistance'),
+        ('COLLATION', 'Collation'),
+        ('AUTRE', 'Autre'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    exercice = models.ForeignKey('Exercice', on_delete=models.CASCADE, related_name='depenses', verbose_name="Exercice")
+    type_depense = models.CharField(max_length=15, choices=TYPE_CHOICES, verbose_name="Type de dépense")
+    montant = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0)], verbose_name="Montant (FCFA)")
+    description = models.TextField(verbose_name="Description")
+    session = models.ForeignKey('Session', on_delete=models.SET_NULL, null=True, blank=True, related_name='depenses')
+    beneficiaire = models.ForeignKey('Membre', on_delete=models.SET_NULL, null=True, blank=True, related_name='aides_reçues', verbose_name="Bénéficiaire (si applicable)")
+    date_creation = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        verbose_name = "Dépense d'exercice"
+        verbose_name_plural = "Dépenses d'exercice"
+        ordering = ['-date_creation']
+    
+    def __str__(self):
+        return f"{self.type_depense} - {self.montant:,.0f} FCFA ({self.exercice.nom})"
+
 class ConfigurationMutuelle(models.Model):
     """
     Configuration globale de la mutuelle (paramètres modifiables)
@@ -232,12 +262,28 @@ class Exercice(models.Model):
         with transaction.atomic():
             # ✅ SI C'EST UN NOUVEL EXERCICE AVEC STATUT EN_COURS
             if is_new and self.statut == 'EN_COURS':
-                # 1️⃣ Marquer l'exercice EN_COURS précédent comme TERMINE
+                # 1️⃣ CRÉER LES RENFLOUEMENTS DE FIN D'EXERCICE AVANT DE TERMINER L'ANCIEN
                 previous_current_exercice = Exercice.objects.filter(
                     statut='EN_COURS'
                 ).first()
                 
                 if previous_current_exercice:
+                    print(f"\n📊 CLÔTURE AUTOMATIQUE DE L'EXERCICE PRÉCÉDENT: {previous_current_exercice.nom}")
+                    print(f"{'='*70}")
+                    
+                    # ✅ APPELER LA CRÉATION DES RENFLOUEMENTS
+                    try:
+                        result = previous_current_exercice.creer_renflouements_fin_exercice()
+                        print(f"✅ Renflouements créés avec succès:")
+                        print(f"   - Total dépenses: {result['total_depenses']:,.0f} FCFA")
+                        print(f"   - Nombre de membres EN_REGLE: {result['nombre_membres']}")
+                        print(f"   - Montant par membre: {result['montant_par_membre']:,.0f} FCFA")
+                        print(f"   - Renflouements créés: {result['renflouements_crees']}")
+                    except Exception as e:
+                        print(f"❌ ERREUR lors de la création des renflouements: {e}")
+                        # On continue même si ça échoue (pour ne pas bloquer la création du nouvel exercice)
+                    
+                    # 2️⃣ Marquer l'exercice EN_COURS précédent comme TERMINE
                     previous_current_exercice.statut = 'TERMINE'
                     previous_current_exercice.save(update_fields=['statut', 'date_modification'])
                     print(f"📝 Exercice précédent {previous_current_exercice.nom} marqué comme TERMINE")
@@ -380,6 +426,114 @@ class Exercice(models.Model):
             self.save()
             return True
         return False
+
+    def creer_renflouements_fin_exercice(self):
+        """
+        ✅ NOUVELLE MÉTHODE: Crée les renflouements à la fin de l'exercice
+        
+        Logique:
+        1. Récupérer le total des dépenses de l'exercice
+        2. Diviser le montant entre les membres EN_REGLE
+        3. Créer un renflouement par membre
+        
+        Returns:
+            dict: {
+                'total_depenses': Decimal,
+                'nombre_membres': int,
+                'montant_par_membre': Decimal,
+                'renflouements_crees': int
+            }
+        """
+        from transactions.models import Renflouement
+        
+        result = {
+            'total_depenses': Decimal('0'),
+            'nombre_membres': 0,
+            'montant_par_membre': Decimal('0'),
+            'renflouements_crees': 0
+        }
+        
+        print(f"\n📋 CRÉATION DES RENFLOUEMENTS FIN D'EXERCICE: {self.nom}")
+        print(f"{'='*70}")
+        
+        # 1. Récupérer le total des dépenses de cet exercice
+        total_depenses = DépenseExercice.objects.filter(
+            exercice=self
+        ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+        
+        result['total_depenses'] = total_depenses
+        
+        if total_depenses == 0:
+            print("⚠️  Aucune dépense enregistrée pour cet exercice.")
+            return result
+        
+        print(f"💰 Total des dépenses: {total_depenses:,.0f} FCFA")
+        
+        # 2. Récupérer les membres EN_REGLE
+        membres_en_regle = Membre.objects.filter(
+            statut='EN_REGLE'
+        ).count()
+        
+        result['nombre_membres'] = membres_en_regle
+        
+        if membres_en_regle == 0:
+            print("⚠️  Aucun membre EN_REGLE pour recevoir les renflouements.")
+            return result
+        
+        print(f"👥 Nombre de membres EN_REGLE: {membres_en_regle}")
+        
+        # 3. Calculer le montant par membre
+        montant_par_membre = (total_depenses / membres_en_regle).quantize(
+            Decimal('0.01'), rounding=ROUND_HALF_UP
+        )
+        
+        result['montant_par_membre'] = montant_par_membre
+        print(f"📊 Montant par membre: {montant_par_membre:,.0f} FCFA")
+        
+        # 4. Créer les renflouements dans une transaction atomique
+        try:
+            with transaction.atomic():
+                # Récupérer la dernière session de l'exercice
+                derniere_session = Session.objects.filter(
+                    exercice=self
+                ).order_by('-date_session').first()
+                
+                if not derniere_session:
+                    print("⚠️  Aucune session trouvée pour cet exercice.")
+                    return result
+                
+                membres = Membre.objects.filter(statut='EN_REGLE')
+                
+                for membre in membres:
+                    # Vérifier que le renflouement n'existe pas déjà
+                    exists = Renflouement.objects.filter(
+                        membre=membre,
+                        session=derniere_session,
+                        type_cause='RENFLOUEMENT_FIN_EXERCICE'
+                    ).exists()
+                    
+                    if not exists:
+                        Renflouement.objects.create(
+                            membre=membre,
+                            session=derniere_session,
+                            montant_du=montant_par_membre,
+                            montant_paye=Decimal('0'),
+                            type_cause='RENFLOUEMENT_FIN_EXERCICE',
+                            cause=f"Renflouement de fin d'exercice {self.nom} - Total dépenses: {total_depenses:,.0f} FCFA"
+                        )
+                        result['renflouements_crees'] += 1
+                        print(f"   ✅ Renflouement créé pour {membre.numero_membre}")
+                    else:
+                        print(f"   ⚠️  Renflouement déjà existant pour {membre.numero_membre}")
+                
+                print(f"\n✅ {result['renflouements_crees']} renflouement(s) créé(s) avec succès")
+                print(f"{'='*70}\n")
+                
+        except Exception as e:
+            print(f"❌ ERREUR lors de la création des renflouements: {e}")
+            raise
+        
+        return result
 
     def clean(self):
         """
@@ -563,15 +717,9 @@ class Session(models.Model):
             # 4. SAUVEGARDE
             super().save(*args, **kwargs)
             
-            # 5. Traitement post-sauvegarde (Renflouements, etc.)
+            # 5. Traitement post-sauvegarde (pas de renflouements créés ici)
             if is_new and self.statut == 'EN_COURS' and self.montant_collation > 0 and not is_first_session:
-                # 1. Créer les renflouements D'ABORD
-                if not self._creer_renflouement_collation():
-                    raise ValidationError(
-                        "❌ ÉCHEC : Impossible de créer les renflouements de collation"
-                    )
-                
-                # 2. Retirer du fonds social ENSUITE
+                # 1. Retirer du fonds social POUR LA COLLATION (sans créer de renflouements)
                 if not self._retirer_collation_fonds_social():
                     raise ValidationError(
                         "❌ ÉCHEC : Impossible de retirer la collation du fonds social"
@@ -612,7 +760,7 @@ class Session(models.Model):
 
                 est_en_regle = membre.calculer_statut_en_regle()
 
-                nouveau_statut = 'EN_REGLE' if est_en_regle == 'EN_REGLE' else 'NON_EN_REGLE'
+                nouveau_statut = 'EN_REGLE' if est_en_regle else 'NON_EN_REGLE'
 
                 if membre.statut != nouveau_statut:
                     print(
@@ -628,71 +776,10 @@ class Session(models.Model):
                     )
         
 
-    
-    def _creer_renflouement_collation(self):
-        """
-        Crée les renflouements pour la collation
-        
-        pour l'instant on va considerer que tout le monde participe au renflouement
-
-        Returns:
-            bool: True si succès, False si échec
-        """
-        try:
-            from core.models import Membre
-            from transactions.models import Renflouement
-            
-            membres_en_regle = Membre.objects.filter(
-                date_inscription__lte=self.date_session
-            )
-            
-            nombre_membres = membres_en_regle.count()
-            if nombre_membres == 0:
-                print("⚠️ ATTENTION : Aucun membre pour le renflouement de collation")
-                return False
-            
-            montant_par_membre = (Decimal(str(self.montant_collation)) / nombre_membres).quantize(
-                Decimal('0.01'), rounding=ROUND_HALF_UP
-            )
-            
-            print(f"👥 {nombre_membres} membres en règle → {montant_par_membre:,.0f} FCFA chacun")
-            
-            renflouements_crees = 0
-            for membre in membres_en_regle:
-                try:
-                    renflouement, created = Renflouement.objects.get_or_create(
-                        membre=membre,
-                        session=self,
-                        type_cause='COLLATION',
-                        defaults={
-                            'montant_du': montant_par_membre,
-                            'cause': f"Collation Session {self.nom} - {self.date_session}",
-                        }
-                    )
-                    if created:
-                        renflouements_crees += 1
-                        print(f"   ✅ Renflouement créé pour {membre.numero_membre}")
-                    else:
-                        print(f"   ⚠️ Renflouement déjà existant pour {membre.numero_membre}")
-                        
-                except Exception as e:
-                    print(f"   ❌ Erreur création renflouement pour {membre.numero_membre}: {e}")
-                    raise  # ✅ RELANCER pour faire échouer la transaction
-            
-            if renflouements_crees == 0 and nombre_membres > 0:
-                print("⚠️ Aucun nouveau renflouement créé (peut-être déjà existants)")
-            else:
-                print(f"✅ {renflouements_crees} renflouements créés avec succès")
-            
-            return True
-            
-        except Exception as e:
-            print(f"❌ ERREUR dans _creer_renflouement_collation: {e}")
-            return False
-    
     def _retirer_collation_fonds_social(self):
         """
         Retire le montant de la collation du fonds social
+        Enregistre aussi la dépense pour le renflouement de fin d'exercice
         
         Returns:
             bool: True si succès, False si échec
@@ -714,6 +801,19 @@ class Session(models.Model):
             ):
                 print(f"❌ ERREUR : Échec du retrait de {self.montant_collation:,.0f} FCFA")
                 return False
+            
+            # Enregistrer la dépense pour le renflouement
+            try:
+                DépenseExercice.objects.create(
+                    exercice=self.exercice,
+                    type_depense='COLLATION',
+                    montant=self.montant_collation,
+                    description=f"Collation Session {self.nom} - {self.date_session}",
+                    session=self
+                )
+                print(f"   📋 Dépense collation enregistrée: {self.montant_collation:,.0f} FCFA")
+            except Exception as e:
+                print(f"⚠️  Erreur lors de l'enregistrement de la dépense collation: {e}")
             
             print(f"💰 Fonds social après retrait : {fonds.montant_total:,.0f} FCFA")
             print(f"✅ {self.montant_collation:,.0f} FCFA retirés du fonds social")
