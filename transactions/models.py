@@ -1,3 +1,4 @@
+from logging import config
 from django.db import models
 from django.core.validators import MinValueValidator
 from django.conf import settings
@@ -345,6 +346,53 @@ class Emprunt(models.Model):
         nouveau_statut = 'EN_COURS'
         print(f"   🔄 Emprunt en cours normal -> {nouveau_statut}")
         return nouveau_statut
+    
+    def capitaliser_interets_retard(self):
+        from core.models import ConfigurationMutuelle, Session
+        from decimal import Decimal
+        import datetime
+
+    # 1. On compte les sessions TERMINEES après l'octroi du prêt
+        query_sessions = Session.objects.filter(
+            date_session__gt=self.session_emprunt.date_session,
+            statut='TERMINEE'
+        )
+        sessions_passees = query_sessions.count()
+
+        print(f"🔍 Audit Emprunt {self.membre}: Sessions écoulées={sessions_passees}")
+
+    # 2. Condition : On applique l'intérêt UNIQUEMENT toutes les 3 sessions
+    # (3, 6, 9, 12...) et seulement si sessions_passees > 0
+        if sessions_passees > 0 and sessions_passees % 3 == 0 and self.statut != 'REMBOURSE':
+        
+        # --- SÉCURITÉ : Éviter d'ajouter plusieurs fois pour la même session ---
+        # On vérifie si on n'a pas déjà ajouté une pénalité pour ce "palier" de sessions
+            label_palier = f"Palier {sessions_passees} sessions"
+            if label_palier in (self.notes or ""):
+                print(f"⏭️ Saut : Pénalité déjà appliquée pour le palier {sessions_passees}")
+                return False
+
+            config = ConfigurationMutuelle.objects.first()
+            if not config:
+                return False
+            
+            taux = config.taux_interet / Decimal('100')
+            reste = self.montant_total_a_rembourser - self.montant_rembourse
+        
+            if reste > 0:
+                penalite = reste * taux
+                self.montant_total_a_rembourser += penalite
+                self.statut = 'EN_RETARD'
+            
+                horodatage = datetime.datetime.now().strftime("%d/%m/%Y")
+            # On ajoute le nom du palier dans la note pour le suivi
+                self.notes = (self.notes or "") + f"\n[{horodatage}] {label_palier}: +{penalite} FCFA"
+            
+                self.save()
+                print(f"💰 Pénalité palier {sessions_passees} appliquée : +{penalite} FCFA")
+                return True
+            
+        return False
     
     def save(self, *args, **kwargs):
         """Sauvegarde avec escompte : le membre reçoit le net et doit le nominal."""
