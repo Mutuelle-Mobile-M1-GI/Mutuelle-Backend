@@ -634,22 +634,33 @@ class Session(models.Model):
     def save(self, *args, **kwargs):
         from django.db import transaction
         from django.core.exceptions import ValidationError
-        from .models import Exercice, FondsSocial # Imports locaux
-    
+        from .models import Exercice, FondsSocial
+        
+        # 1. Détection de l'état initial
         is_new = self.pk is None
+        was_en_cours = False
+        
+        if not is_new:
+            try:
+                # On récupère la version en base de données avant la modif
+                old_version = Session.objects.get(pk=self.pk)
+                was_en_cours = (old_version.statut == 'EN_COURS')
+            except Session.DoesNotExist:
+                is_new = True
+
         print(f"DEBUG SAVE SESSION: is_new={is_new}, nom={self.nom}, statut={self.statut}")
 
-    # 1. Gestion automatique du nom
+        # 2. Gestion automatique du nom
         if not self.nom:
             if self.date_session:
                 mois_fr = ["Janvier", "Février", "Mars", "Avril", "Mai", "Juin", 
-                        "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre"]
+                          "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre"]
                 self.nom = f"Session {mois_fr[self.date_session.month - 1]} {self.date_session.year}"
             else:
                 from django.utils import timezone
                 self.nom = f"Session {timezone.now().strftime('%B %Y')}"
 
-    # 2. Assignation de l'exercice par défaut
+        # 3. Assignation de l'exercice par défaut
         if not self.exercice_id and not self.exercice:
             exercice_en_cours = Exercice.get_exercice_en_cours()
             if exercice_en_cours:
@@ -661,55 +672,61 @@ class Session(models.Model):
                     defaults={'nom': f'Exercice {date.today().year}', 'date_debut': date.today()}
                 )
 
-    # 3. Vérification préliminaire du Fonds Social (Hors transaction)
-        is_first_session = Session.objects.count() == 0
-        if is_new and self.statut == 'EN_COURS' and self.montant_collation > 0 and not is_first_session:
+        # 4. Vérification préliminaire du Fonds Social
+        is_first_session = (Session.objects.count() == 0) if is_new else False
+        
+        # On vérifie si on s'apprête à activer une session avec collation
+        if self.statut == 'EN_COURS' and not was_en_cours and self.montant_collation > 0 and not is_first_session:
             fonds = FondsSocial.get_fonds_actuel()
             if not fonds or fonds.montant_total < self.montant_collation:
                 dispo = fonds.montant_total if fonds else 0
                 raise ValidationError(f"❌ Fonds social insuffisant. Dispo: {dispo} FCFA")
             print(f"✅ Vérification fonds social OK : {fonds.montant_total:,.0f} FCFA")
 
-    # 4. EXECUTION ATOMIQUE
+        # 5. EXECUTION ATOMIQUE
         with transaction.atomic():
-        # Identifier la session précédente EN_COURS
+            # Identifier la session précédente EN_COURS pour la fermer
             previous = None
-            if is_new and self.statut == 'EN_COURS':
+            if self.statut == 'EN_COURS' and not was_en_cours:
                 previous = Session.objects.filter(
                     exercice=self.exercice, 
                     statut='EN_COURS'
                 ).exclude(pk=self.pk).first()
-        # Sauvegarde réelle de la session
+
+            # --- SAUVEGARDE RÉELLE ---
             super().save(*args, **kwargs)
 
-        # Retrait de la collation du fonds social
-            if is_new and self.statut == 'EN_COURS' and self.montant_collation > 0 and not is_first_session:
-                if hasattr(self, '_retirer_collation_fonds_social'):
-                    if not self._retirer_collation_fonds_social():
-                        raise ValidationError("❌ Échec du retrait de la collation.")
+            # 6. Actions déclenchées uniquement lors du PASSAGE à 'EN_COURS'
+            if self.statut == 'EN_COURS' and not was_en_cours:
+                
+                # A. Retrait de la collation
+                if self.montant_collation > 0 and not is_first_session:
+                    if hasattr(self, '_retirer_collation_fonds_social'):
+                        if not self._retirer_collation_fonds_social():
+                            raise ValidationError("❌ Échec du retrait de la collation.")
 
-        # Traitement de clôture et capitalisation
-            if is_new and self.statut == 'EN_COURS':
-            # Clôture de l'ancienne session
+                # B. Clôture de l'ancienne session
                 if previous:
                     Session.objects.filter(pk=previous.pk).update(statut='TERMINEE')
                     print(f"✅ Session précédente {previous.nom} clôturée.")
 
-            # --- DÉBUT CAPITALISATION DES INTÉRÊTS ---
+                # C. CAPITALISATION DES INTÉRÊTS
                 try:
-                    print("🚀 SCAN DES EMPRUNTS EN COURS...")
+                    print("🚀 DÉMARRAGE DU SCAN DES EMPRUNTS...")
                     from transactions.models import Emprunt
+                    # On cible uniquement les emprunts qui ne sont pas remboursés
                     emprunts_actifs = Emprunt.objects.exclude(statut='REMBOURSE')
-                
+                    
                     count_penalites = 0
                     for emprunt in emprunts_actifs:
+                        # La fonction renvoie True si une pénalité a été ajoutée
                         if emprunt.capitaliser_interets_retard():
                             count_penalites += 1
                     print(f"📊 FIN DU SCAN: {count_penalites} pénalités appliquées.")
                 except Exception as e:
-                    print(f"⚠️ Erreur mineure pendant le scan (non bloquante): {str(e)}")
+                    print(f"⚠️ Erreur mineure pendant le scan: {str(e)}")
 
-    # 5. Mise à jour finale des membres (Statuts)
+        # 7. Mise à jour finale des membres (Hors transaction)
         if hasattr(self, 'mettre_a_jour_statuts_membres'):
             self.mettre_a_jour_statuts_membres()
     
