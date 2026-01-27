@@ -31,7 +31,7 @@ def calculer_cumul_epargnes_total():
     from decimal import Decimal
     
     total_tresor = Decimal('0')
-    membres_actifs = Membre.objects.filter(statut__in=['EN_REGLE', 'NON_EN_REGLE'])
+    membres_actifs = Membre.objects.filter(statut__in=['EN_REGLE', 'NON_EN_REGLE', 'NON_DEFINI'])
     
     for membre in membres_actifs:
         # On utilise solde_total_global qui fait : calculer_epargne_pure + calculer_total_gains
@@ -181,7 +181,7 @@ def calculer_donnees_membre_completes(membre):
         type_transaction='RETOUR_REMBOURSEMENT'
     ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
     
-    epargne_totale = epargne_base - retraits_prets + interets_recus + retours_remboursements    #quel est la difference entre interets_recu et retours_remboursements ?
+    epargne_totale = epargne_base + interets_recus
     
     epargne_data = {
         'epargne_base': epargne_base,
@@ -282,6 +282,7 @@ def calculer_donnees_membre_completes(membre):
 
         en_regle = (
             solidarite_data['solidarite_a_jour'] and
+            renflouement_data['renflouement_a_jour'] and
             inscription_data['inscription_complete'] and
             emprunt_data['montant_restant_a_rembourser'] < Decimal('100')
         )

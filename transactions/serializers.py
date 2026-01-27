@@ -6,7 +6,7 @@ from .models import (
     Emprunt, Remboursement, AssistanceAccordee, Renflouement,
     PaiementRenflouement
 )
-
+from core.models import DépenseExercice
 from core.serializers import MembreSimpleSerializer, SessionSerializer, TypeAssistanceSerializer
 import logging
 from rest_framework.response import Response
@@ -317,3 +317,21 @@ class StatistiquesTransactionsSerializer(serializers.Serializer):
     renflouements = serializers.DictField()
     # Ajoute ceci pour le classement
     top_epargnants = TopEpargnantSerializer(many=True, read_only=True)
+
+
+class DépenseExerciceSerializer(serializers.ModelSerializer):
+    """
+    ✅ NOUVEAU: Serializer pour les dépenses d'exercice
+    """
+    exercice_nom = serializers.CharField(source='exercice.nom', read_only=True)
+    session_nom = serializers.CharField(source='session.nom', read_only=True, allow_null=True)
+    beneficiaire_info = MembreSimpleSerializer(source='beneficiaire', read_only=True, allow_null=True)
+    
+    class Meta:
+        model = DépenseExercice
+        fields = [
+            'id', 'exercice', 'exercice_nom', 'type_depense', 'montant',
+            'description', 'session', 'session_nom', 'beneficiaire', 
+            'beneficiaire_info', 'date_creation'
+        ]
+        read_only_fields = ['id', 'date_creation']
