@@ -632,170 +632,84 @@ class Session(models.Model):
 
 
     def save(self, *args, **kwargs):
-        old_statut = None
+        from django.db import transaction
+        from django.core.exceptions import ValidationError
+        from .models import Exercice, FondsSocial # Imports locaux
+    
         is_new = self.pk is None
-        
-        # 1. Gestion automatique du nom et de l'exercice
+        print(f"DEBUG SAVE SESSION: is_new={is_new}, nom={self.nom}, statut={self.statut}")
+
+    # 1. Gestion automatique du nom
         if not self.nom:
             if self.date_session:
-                mois_fr = [
-                    "Janvier", "Février", "Mars", "Avril", "Mai", "Juin",
-                    "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre"
-                ]
-                mois = mois_fr[self.date_session.month - 1]
-                self.nom = f"Session {mois} {self.date_session.year}"
+                mois_fr = ["Janvier", "Février", "Mars", "Avril", "Mai", "Juin", 
+                        "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre"]
+                self.nom = f"Session {mois_fr[self.date_session.month - 1]} {self.date_session.year}"
             else:
                 from django.utils import timezone
-                now = timezone.now()
-                self.nom = f"Session {now.strftime('%B %Y')}"
-        
-        # ✅ Obtenir l'ancien statut SEULEMENT si l'instance existe déjà
-        if not is_new:
-            try:
-                old_instance = Session.objects.get(pk=self.pk)
-                old_statut = old_instance.statut
-            except Session.DoesNotExist:
-                is_new = True
-                old_statut = None
-            
-        # ✅ Assigner l'exercice en cours si pas spécifié
+                self.nom = f"Session {timezone.now().strftime('%B %Y')}"
+
+    # 2. Assignation de l'exercice par défaut
         if not self.exercice_id and not self.exercice:
             exercice_en_cours = Exercice.get_exercice_en_cours()
             if exercice_en_cours:
                 self.exercice = exercice_en_cours
             else:
                 from datetime import date
-                exercice, created = Exercice.objects.get_or_create(
+                self.exercice, _ = Exercice.objects.get_or_create(
                     statut='EN_COURS',
-                    defaults={
-                        'nom': f'Exercice {date.today().year}',
-                        'date_debut': date.today(),
-                        'statut': 'EN_COURS'
-                    }
+                    defaults={'nom': f'Exercice {date.today().year}', 'date_debut': date.today()}
                 )
-                self.exercice = exercice
-        
-        # ✅ VÉRIFIER SI C'EST LA PREMIÈRE SESSION (table vide)
-        is_first_session = Session.objects.count() == 0
-        
-        if is_first_session:
-            print(f"⚠️ PREMIÈRE SESSION DE LA TABLE : Pas de traitement de collation")
-        
-        # ✅ VÉRIFIER LE FONDS SOCIAL AVANT DE COMMENCER LA TRANSACTION
-        # Si la collation est > 0 ET ce n'est pas la première session, on vérifie AVANT de créer quoi que ce soit
-        if is_new and self.statut == 'EN_COURS' and self.montant_collation > 0 and not is_first_session:
-            from core.models import FondsSocial
-            
-            fonds = FondsSocial.get_fonds_actuel()
-            if not fonds:
-                raise ValidationError(
-                    "❌ IMPOSSIBLE DE CRÉER LA SESSION : Aucun fonds social actuel trouvé"
-                )
-            
-            if fonds.montant_total < self.montant_collation:
-                raise ValidationError(
-                    f"❌ IMPOSSIBLE DE CRÉER LA SESSION : Fonds social insuffisant."
-                    f"   Disponible : {fonds.montant_total:,.0f} FCFA"
-                    f"   Nécessaire : {self.montant_collation:,.0f} FCFA"
-                    f"   Manque : {self.montant_collation - fonds.montant_total:,.0f} FCFA"
-                )
-            
-        from django.db import transaction
-        from django.core.exceptions import ValidationError
-        from decimal import Decimal
-        
-        old_statut = None
-        is_new = self.pk is None
-        print(f"DEBUG SAVE SESSION: is_new={is_new}, nom={self.nom}, statut={self.statut}")
 
-        # 1. Gestion automatique du nom
-        if not self.nom:
-            if self.date_session:
-                mois_fr = ["Janvier", "Février", "Mars", "Avril", "Mai", "Juin", 
-                           "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre"]
-                self.nom = f"Session {mois_fr[self.date_session.month - 1]} {self.date_session.year}"
-            else:
-                from django.utils import timezone
-                self.nom = f"Session {timezone.now().strftime('%B %Y')}"
-    
-        # 2. Vérification instance existante
-        if not is_new:
-            try:
-                old_instance = Session.objects.get(pk=self.pk)
-                old_statut = old_instance.statut
-            except Session.DoesNotExist:
-                is_new = True
-        
-        # 3. Exercice par défaut
-        if not self.exercice_id and not self.exercice:
-            from .models import Exercice
-            exercice_en_cours = Exercice.get_exercice_en_cours()
-            self.exercice = exercice_en_cours
-
-        # 4. Vérification Fonds Social
+    # 3. Vérification préliminaire du Fonds Social (Hors transaction)
         is_first_session = Session.objects.count() == 0
         if is_new and self.statut == 'EN_COURS' and self.montant_collation > 0 and not is_first_session:
-            from .models import FondsSocial
             fonds = FondsSocial.get_fonds_actuel()
             if not fonds or fonds.montant_total < self.montant_collation:
-                raise ValidationError("❌ Fonds social insuffisant pour la collation.")
-                
-            print(f"✅ Vérification fonds social OK : {fonds.montant_total:,.0f} FCFA disponible")
+                dispo = fonds.montant_total if fonds else 0
+                raise ValidationError(f"❌ Fonds social insuffisant. Dispo: {dispo} FCFA")
+            print(f"✅ Vérification fonds social OK : {fonds.montant_total:,.0f} FCFA")
 
-        # 5. EXECUTION (Bloc Atomique)
+    # 4. EXECUTION ATOMIQUE
         with transaction.atomic():
-            # Identifier l'ancienne session à fermer
+        # Identifier la session précédente EN_COURS
             previous = None
-
             if is_new and self.statut == 'EN_COURS':
                 previous = Session.objects.filter(
                     exercice=self.exercice, 
                     statut='EN_COURS'
                 ).exclude(pk=self.pk).first()
-
-            # Sauvegarde de la session actuelle
+        # Sauvegarde réelle de la session
             super().save(*args, **kwargs)
-        
-            # Retrait collation
+
+        # Retrait de la collation du fonds social
             if is_new and self.statut == 'EN_COURS' and self.montant_collation > 0 and not is_first_session:
                 if hasattr(self, '_retirer_collation_fonds_social'):
-                    self._retirer_collation_fonds_social()
-        
-            # 6. Clôture précédente et Recalcul Intérêts
-            # On lance le scan si c'est une nouvelle session EN_COURS
+                    if not self._retirer_collation_fonds_social():
+                        raise ValidationError("❌ Échec du retrait de la collation.")
+
+        # Traitement de clôture et capitalisation
             if is_new and self.statut == 'EN_COURS':
+            # Clôture de l'ancienne session
                 if previous:
                     Session.objects.filter(pk=previous.pk).update(statut='TERMINEE')
                     print(f"✅ Session précédente {previous.nom} clôturée.")
-                
-                # --- DÉBUT CAPITALISATION ---
-                print("🚀 SCAN DES EMPRUNTS EN COURS...")
-                from transactions.models import Emprunt
-                # On récupère tous les emprunts non remboursés
-                emprunts_actifs = Emprunt.objects.exclude(statut='REMBOURSE')
-                
-                count_penalites = 0
-                for emprunt in emprunts_actifs:
-                    if emprunt.capitaliser_interets_retard():
-                        count_penalites += 1
-                
-                print(f"📊 FIN DU SCAN: {count_penalites} pénalités appliquées.")
 
-            # 5. Traitement post-sauvegarde (pas de renflouements créés ici)
-            if is_new and self.statut == 'EN_COURS' and self.montant_collation > 0 and not is_first_session:
-                # 1. Retirer du fonds social POUR LA COLLATION (sans créer de renflouements)
-                if not self._retirer_collation_fonds_social():
-                    raise ValidationError(
-                        "❌ ÉCHEC : Impossible de retirer la collation du fonds social"
-                    )
-            
-            # 6. MARQUER LA SESSION PRÉCÉDENTE COMME TERMINEE SEULEMENT APRÈS SUCCÈS
-            # (Tout s'est bien passé, on peut fermer l'ancienne session en toute sécurité)
-            if is_new and self.statut == 'EN_COURS' and previous:
-                Session.objects.filter(pk=previous.pk).update(statut='TERMINEE')
-                print(f"✅ Session précédente {previous.nom} clôturée automatiquement.")
-        
-        # 7. Mise à jour statuts membres
+            # --- DÉBUT CAPITALISATION DES INTÉRÊTS ---
+                try:
+                    print("🚀 SCAN DES EMPRUNTS EN COURS...")
+                    from transactions.models import Emprunt
+                    emprunts_actifs = Emprunt.objects.exclude(statut='REMBOURSE')
+                
+                    count_penalites = 0
+                    for emprunt in emprunts_actifs:
+                        if emprunt.capitaliser_interets_retard():
+                            count_penalites += 1
+                    print(f"📊 FIN DU SCAN: {count_penalites} pénalités appliquées.")
+                except Exception as e:
+                    print(f"⚠️ Erreur mineure pendant le scan (non bloquante): {str(e)}")
+
+    # 5. Mise à jour finale des membres (Statuts)
         if hasattr(self, 'mettre_a_jour_statuts_membres'):
             self.mettre_a_jour_statuts_membres()
     
