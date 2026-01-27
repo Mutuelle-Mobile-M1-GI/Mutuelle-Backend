@@ -35,31 +35,49 @@ def main():
     # 1. Définition des types d'assistance à initialiser
     types_a_initialiser = [
         {
-            'nom': 'Mariage',
-            'montant': Decimal('500000.00'),
-            'description': 'Assistance financière en cas de mariage du membre.',
-            'actif': True
-        },
-        {
-            'nom': 'Décès',
-            'montant': Decimal('1500000.00'),
-            'description': "Soutien financier en cas de décès d'un membre ou d'un ayant droit.",
-            'actif': True
-        },
-        {
-            'nom': 'Naissance',
+            'nom': 'Maladie',
             'montant': Decimal('300000.00'),
-            'description': "Prime de naissance pour le nouveau-né d'un membre.",
+            'description': "Assistance financière accordée au membre en cas de maladie nécessitant des soins ou une hospitalisation.",
             'actif': True
         },
         {
-            'nom': 'Sinistre',
-            'montant': Decimal('2000000.00'),
-            'description': "Aide exceptionnelle en cas de sinistre majeur (incendie, inondation, etc.).",
-            'actif': False # Exemple de type désactivé
+            'nom': 'Mariage',
+            'montant': Decimal('100000.00'),
+            'description': "Aide financière octroyée au membre à l’occasion de son mariage.",
+            'actif': True
+        },
+        {
+            'nom': 'Promotion',
+            'montant': Decimal('50000.00'),
+            'description': "Prime accordée au membre suite à une promotion professionnelle ou académique.",
+            'actif': True
+        },
+        {
+            'nom': 'Départ en retraite',
+            'montant': Decimal('500000.00'),
+            'description': "Allocation spéciale versée au membre lors de son départ à la retraite.",
+            'actif': True
+        },
+        {
+            'nom': 'Décès membre',
+            'montant': Decimal('1000000.00'),
+            'description': "Soutien financier accordé à la famille en cas de décès du membre.",
+            'actif': True
+        },
+        {
+            'nom': 'Décès conjoint',
+            'montant': Decimal('500000.00'),
+            'description': "Aide financière versée au membre suite au décès de son conjoint.",
+            'actif': True
+        },
+        {
+            'nom': 'Décès enfant',
+            'montant': Decimal('300000.00'),
+            'description': "Soutien financier accordé au membre en cas de décès de son enfant.",
+            'actif': True
         }
     ]
-
+    
     print(f"\nTentative d'initialisation de {len(types_a_initialiser)} types d'assistance:")
     
     # 2. Utilisation de get_or_create pour l'initialisation
