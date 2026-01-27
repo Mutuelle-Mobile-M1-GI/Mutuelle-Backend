@@ -45,13 +45,13 @@ MEMBERS_LIST = [
 
 def run_import():
     members_data = []
-    
+    i = 0
     for first_name, last_name in MEMBERS_LIST:
         # Génération des identifiants
         clean_first = slugify_name(first_name)
         clean_last = slugify_name(last_name)
         username = f"{clean_first}.{clean_last}"[:30] # Limite Django username
-        email = f"{username}@mutuelle.com"
+        email = f"{clean_first}@mutuelle.com"
         
         members_data.append({
             'email': email,
