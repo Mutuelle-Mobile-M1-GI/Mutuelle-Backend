@@ -352,46 +352,44 @@ class Emprunt(models.Model):
         from decimal import Decimal
         import datetime
 
-    # 1. On compte les sessions TERMINEES après l'octroi du prêt
-        query_sessions = Session.objects.filter(
+        # 1. On compte les sessions TERMINEES strictement après l'octroi
+        sessions_passees = Session.objects.filter(
             date_session__gt=self.session_emprunt.date_session,
             statut='TERMINEE'
-        )
-        sessions_passees = query_sessions.count()
+        ).count()
 
-        print(f"🔍 Audit Emprunt {self.membre}: Sessions écoulées={sessions_passees}")
+        print(f"🔍 Audit {self.membre}: {sessions_passees} sessions écoulées")
 
-    # 2. Condition : On applique l'intérêt UNIQUEMENT toutes les 3 sessions
-    # (3, 6, 9, 12...) et seulement si sessions_passees > 0
+        # 2. Condition Modulo 3 (Tous les 3, 6, 9... mois)
         if sessions_passees > 0 and sessions_passees % 3 == 0 and self.statut != 'REMBOURSE':
-        
-        # --- SÉCURITÉ : Éviter d'ajouter plusieurs fois pour la même session ---
-        # On vérifie si on n'a pas déjà ajouté une pénalité pour ce "palier" de sessions
-            label_palier = f"Palier {sessions_passees} sessions"
-            if label_palier in (self.notes or ""):
-                print(f"⏭️ Saut : Pénalité déjà appliquée pour le palier {sessions_passees}")
+            
+            # SECURITÉ : On vérifie si ce palier précis a déjà été appliqué
+            # Exemple : "Palier 3", "Palier 6", etc.
+            tag_palier = f"Palier-{sessions_passees}"
+            if tag_palier in (self.notes or ""):
+                print(f"⏭️ Palier {sessions_passees} déjà facturé. Repos.")
                 return False
 
             config = ConfigurationMutuelle.objects.first()
-            if not config:
+            if not config or config.taux_interet <= 0:
                 return False
             
+            # 3. Calcul de la pénalité sur le RESTE à payer
             taux = config.taux_interet / Decimal('100')
             reste = self.montant_total_a_rembourser - self.montant_rembourse
-        
+            
             if reste > 0:
                 penalite = reste * taux
                 self.montant_total_a_rembourser += penalite
                 self.statut = 'EN_RETARD'
-            
-                horodatage = datetime.datetime.now().strftime("%d/%m/%Y")
-            # On ajoute le nom du palier dans la note pour le suivi
-                self.notes = (self.notes or "") + f"\n[{horodatage}] {label_palier}: +{penalite} FCFA"
-            
+                
+                date_str = datetime.datetime.now().strftime("%d/%m/%Y")
+                note_entree = f"\n[{date_str}] Intérêt retard ({tag_palier}): +{penalite} FCFA"
+                self.notes = (self.notes or "") + note_entree
+                
                 self.save()
-                print(f"💰 Pénalité palier {sessions_passees} appliquée : +{penalite} FCFA")
+                print(f"💰 SUCCÈS : +{penalite} FCFA ajoutés (Cycle {sessions_passees}/3)")
                 return True
-            
         return False
     
     def save(self, *args, **kwargs):
