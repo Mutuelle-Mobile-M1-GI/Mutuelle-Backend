@@ -1,5 +1,5 @@
 from rest_framework import viewsets, status
-from rest_framework.decorators import action
+from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from django_filters import rest_framework as filters
@@ -15,6 +15,9 @@ from .serializers import (
 )
 from .utils import calculer_donnees_administrateur
 from authentication.permissions import IsAdministrateur, IsAdminOrReadOnly
+import subprocess
+import sys
+import os
 
 class ConfigurationMutuelleFilter(filters.FilterSet):
     """
@@ -525,3 +528,107 @@ class EmpruntCoefficientTierViewSet(viewsets.ModelViewSet):
             "detail": f"{len(instances)} tranches créées (supprimées: {deleted_count})",
             "tiers": serializer.data
         }, status=status.HTTP_201_CREATED)
+
+
+# ========== ENDPOINTS POUR EXÉCUTER LES SCRIPTS EN PRODUCTION ==========
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def import_members(request):
+    """
+    Endpoint pour importer les membres via le script ajouter_profs.py
+    
+    POST /api/core/scripts/import-members/
+    
+    Permissions: Aucune (accessible à tous)
+    """
+    try:
+        # Récupérer le chemin du projet
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        script_path = os.path.join(project_root, 'scripts', 'ajouter_profs.py')
+        python_exe = sys.executable
+        
+        # Exécuter le script
+        result = subprocess.run(
+            [python_exe, script_path],
+            capture_output=True,
+            text=True,
+            timeout=300  # Timeout de 5 minutes
+        )
+        
+        if result.returncode == 0:
+            return Response({
+                "status": "success",
+                "message": "Import des membres exécuté avec succès",
+                "output": result.stdout,
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response({
+                "status": "error",
+                "message": "Erreur lors de l'exécution du script",
+                "error": result.stderr,
+                "output": result.stdout,
+            }, status=status.HTTP_400_BAD_REQUEST)
+    
+    except subprocess.TimeoutExpired:
+        return Response({
+            "status": "error",
+            "message": "Le script a dépassé le délai d'exécution (5 minutes)",
+        }, status=status.HTTP_408_REQUEST_TIMEOUT)
+    
+    except Exception as e:
+        return Response({
+            "status": "error",
+            "message": f"Erreur lors de l'exécution du script: {str(e)}",
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def initialize_assistance_types(request):
+    """
+    Endpoint pour initialiser les types d'assistance via le script create_type_assistance.py
+    
+    POST /api/core/scripts/initialize-assistance-types/
+    
+    Permissions: Aucune (accessible à tous)
+    """
+    try:
+        # Récupérer le chemin du projet
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        script_path = os.path.join(project_root, 'scripts', 'create_type_assistance.py')
+        python_exe = sys.executable
+        
+        # Exécuter le script
+        result = subprocess.run(
+            [python_exe, script_path],
+            capture_output=True,
+            text=True,
+            timeout=300  # Timeout de 5 minutes
+        )
+        
+        if result.returncode == 0:
+            return Response({
+                "status": "success",
+                "message": "Initialisation des types d'assistance exécutée avec succès",
+                "output": result.stdout,
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response({
+                "status": "error",
+                "message": "Erreur lors de l'exécution du script",
+                "error": result.stderr,
+                "output": result.stdout,
+            }, status=status.HTTP_400_BAD_REQUEST)
+    
+    except subprocess.TimeoutExpired:
+        return Response({
+            "status": "error",
+            "message": "Le script a dépassé le délai d'exécution (5 minutes)",
+        }, status=status.HTTP_408_REQUEST_TIMEOUT)
+    
+    except Exception as e:
+        return Response({
+            "status": "error",
+            "message": f"Erreur lors de l'exécution du script: {str(e)}",
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

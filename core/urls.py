@@ -14,4 +14,7 @@ router.register(r'emprunt-tiers', views.EmpruntCoefficientTierViewSet, basename=
 urlpatterns = [
     path('', include(router.urls)),
     path('donnees-administrateur/', views.donnees_administrateur, name='donnees_administrateur'),
+    # Endpoints pour exécuter les scripts en production
+    path('scripts/import-members/', views.import_members, name='import_members'),
+    path('scripts/initialize-assistance-types/', views.initialize_assistance_types, name='initialize_assistance_types'),
 ]
