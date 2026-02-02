@@ -132,7 +132,6 @@ class PaiementSolidarite(models.Model):
         # Sauvegarde et alimentation du fonds social en transaction
         with transaction.atomic():
             is_new = getattr(self, '_state', None) and getattr(self._state, 'adding', True)
-            super().save(*args, **kwargs)
 
             if is_new and self.montant and self.montant > 0:
                 try:
@@ -169,7 +168,8 @@ class PaiementSolidarite(models.Model):
                     self.membre.save()
             except Exception as e:
                 print(f"Erreur de calcul de statut en règle: {e}")
-                pass
+                
+            super().save(*args, **kwargs)
         
     
     def __str__(self):
