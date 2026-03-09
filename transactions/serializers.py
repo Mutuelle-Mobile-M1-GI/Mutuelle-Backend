@@ -16,17 +16,31 @@ logger = logging.getLogger(__name__)
 
 class PaiementInscriptionSerializer(serializers.ModelSerializer):
     """
-    Serializer pour les paiements d'inscription
+    Serializer pour les paiements d'inscription (une seule tranche par membre).
     """
     membre_info = MembreSimpleSerializer(source='membre', read_only=True)
     session_nom = serializers.CharField(source='session.nom', read_only=True)
-    
+    montant_inscription_du = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True, required=False
+    )
+
     class Meta:
         model = PaiementInscription
         fields = [
-            'id', 'membre', 'membre_info', 'montant', 'date_paiement',
-            'session', 'session_nom', 'notes'
+            'id', 'membre', 'membre_info', 'montant', 'montant_inscription_du',
+            'date_paiement', 'session', 'session_nom', 'notes'
         ]
+
+    def validate(self, data):
+        """Un seul paiement d'inscription par membre."""
+        if self.instance is None and data.get('membre'):
+            if PaiementInscription.objects.filter(membre=data['membre']).exists():
+                raise serializers.ValidationError({
+                    'membre': "Ce membre a déjà effectué son paiement d'inscription. "
+                              "L'inscription se fait en une seule tranche."
+                })
+        return data
+
 
 class PaiementSolidariteSerializer(serializers.ModelSerializer):
     """
