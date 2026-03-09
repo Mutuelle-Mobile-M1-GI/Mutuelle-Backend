@@ -6,7 +6,8 @@ from django.db import models
 
 from .models import (
     ConfigurationMutuelle, Exercice, Session, TypeAssistance, 
-    Membre, FondsSocial, MouvementFondsSocial
+    Membre, FondsSocial, MouvementFondsSocial,
+    CaisseInscription, MouvementCaisseInscription
 )
 from authentication.serializers import UtilisateurSerializer
 from .utils import calculer_donnees_membre_completes, calculer_donnees_administrateur
@@ -154,6 +155,35 @@ class MouvementFondsSocialSerializer(serializers.ModelSerializer):
     class Meta:
         model = MouvementFondsSocial
         fields = '__all__'
+
+
+class CaisseInscriptionSerializer(serializers.ModelSerializer):
+    """
+    Serializer pour la caisse inscription
+    """
+    exercice_nom = serializers.CharField(source='exercice.nom', read_only=True)
+    mouvements_recents = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CaisseInscription
+        fields = [
+            'id', 'exercice', 'exercice_nom', 'montant_total',
+            'mouvements_recents', 'date_creation', 'date_modification'
+        ]
+
+    def get_mouvements_recents(self, obj):
+        mouvements = obj.mouvements.all()[:10]
+        return MouvementCaisseInscriptionSerializer(mouvements, many=True).data
+
+
+class MouvementCaisseInscriptionSerializer(serializers.ModelSerializer):
+    """
+    Serializer pour les mouvements de la caisse inscription
+    """
+    class Meta:
+        model = MouvementCaisseInscription
+        fields = '__all__'
+
 
 class MembreSerializer(serializers.ModelSerializer):
     """

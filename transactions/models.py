@@ -5,7 +5,7 @@ from django.conf import settings
 from decimal import Decimal, ROUND_HALF_UP
 import uuid
 from django.db import transaction
-from core.models import Membre, Session, Exercice, TypeAssistance,Interet,FondsSocial
+from core.models import Membre, Session, Exercice, TypeAssistance, Interet, FondsSocial, CaisseInscription
 from decimal import Decimal, ROUND_HALF_UP
 from django.db.models import Sum, Q
 from django.utils import timezone
@@ -17,7 +17,8 @@ from django.utils import timezone
 
 class PaiementInscription(models.Model):
     """
-    Paiements d'inscription par tranche
+    Paiement d'inscription en une seule tranche par membre.
+    Les montants vont dans la caisse inscription (plus dans le fonds social).
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     membre = models.ForeignKey(Membre, on_delete=models.CASCADE, related_name='paiements_inscription')
@@ -26,7 +27,6 @@ class PaiementInscription(models.Model):
         validators=[MinValueValidator(0)],
         verbose_name="Montant payé (FCFA)"
     )
-    # ✅ NOUVEAU CHAMP qui va stocker le montant total de l'inscrption que le membre va devoir payer
     montant_inscription_du = models.DecimalField(
         max_digits=12, decimal_places=2,
         validators=[MinValueValidator(0)],
@@ -36,66 +36,88 @@ class PaiementInscription(models.Model):
     date_paiement = models.DateTimeField(auto_now_add=True, verbose_name="Date de paiement")
     session = models.ForeignKey(Session, on_delete=models.CASCADE, related_name='paiements_inscription', verbose_name="Session")
     notes = models.TextField(blank=True, verbose_name="Notes")
-    
+
     class Meta:
         verbose_name = "Paiement d'inscription"
         verbose_name_plural = "Paiements d'inscription"
         ordering = ['-date_paiement']
-        
+        constraints = [
+            models.UniqueConstraint(fields=['membre'], name='unique_paiement_inscription_par_membre'),
+        ]
+
     def save(self, *args, **kwargs):
-        # Sauvegarde et alimentation du fonds social en transaction
+        """
+        - Un seul paiement d'inscription par membre (contrainte unique).
+        - Alimente la caisse inscription uniquement avec la partie DUE.
+        - Surplus éventuel versé en épargne personnelle (sans doubler en caisse).
+        """
+        from core.models import ConfigurationMutuelle
+
         with transaction.atomic():
-            is_new = getattr(self, '_state', None) and getattr(self._state, 'adding', True)
-            if is_new and self.montant and self.montant > 0:
-                try:
-                    fonds = FondsSocial.get_fonds_actuel()
-                    if fonds:
-                        desc = f"Inscription {self.membre.numero_membre} - Session {self.session.nom}"
-                        fonds.ajouter_montant(self.montant, description=desc)
-                    else:
-                        print("Aucun fonds social actuel trouvé pour l'inscription")
-                except Exception as e:
-                    print(f"Erreur alimentation fonds pour inscription: {e}")
-            
-            is_new = self.pk is None
-            # ✅ LOGIC AMÉLIORÉE: Gérer le montant_inscription_du
+            is_new = getattr(self._state, 'adding', True)
+
+            if is_new and PaiementInscription.objects.filter(membre=self.membre).exists():
+                from django.core.exceptions import ValidationError
+                raise ValidationError(
+                    "Ce membre a déjà un paiement d'inscription. L'inscription se fait en une seule tranche."
+                )
+
+            # 1) Montant dû = config (une seule tranche)
             if is_new:
-                # Pour le premier paiement, enregistrer le montant actuel de la config
-                premier_paiement = PaiementInscription.objects.filter(
-                    membre=self.membre
-                ).exists()
+                config = ConfigurationMutuelle.get_configuration()
+                self.montant_inscription_du = config.montant_inscription
+                print(f"📝 Paiement inscription (une tranche): montant dû = {self.montant_inscription_du}")
 
-                if not premier_paiement:
-                    # C'est le PREMIER paiement d'inscription de ce membre
-                    from core.models import ConfigurationMutuelle
-                    config = ConfigurationMutuelle.get_configuration()
-                    self.montant_inscription_du = config.montant_inscription
-                    print(f"📝 Premier paiement inscription: montant dû = {self.montant_inscription_du}")
-                else:
-                    # C'est un paiement suivant, récupérer le montant du premier paiement
-                    self.montant_inscription_du = premier_paiement.montant_inscription_du
-                    print(f"📝 Paiement suivant: montant dû = {self.montant_inscription_du}")
+            # 2) Surplus éventuel (avec une tranche: restant_avant = montant_du)
+            surplus_pour_epargne = Decimal('0')
+            montant_pour_caisse = Decimal('0')
+            if is_new and self.montant and self.montant > 0:
+                montant_du = self.montant_inscription_du
+                # Part qui règle l'inscription (max = montant_du)
+                montant_pour_caisse = min(self.montant, montant_du)
+                if self.montant > montant_du:
+                    surplus_pour_epargne = self.montant - montant_du
+                    print(
+                        f"💰 Surplus inscription pour {self.membre.numero_membre} : "
+                        f"{surplus_pour_epargne} FCFA (sera versé en épargne)"
+                    )
 
+            # 3) Sauvegarde du paiement
             super().save(*args, **kwargs)
 
-            # ✅ Mettre à jour le statut inscription_terminee du membre
+            # 4) Alimenter la caisse inscription UNIQUEMENT avec la partie due
+            if is_new and montant_pour_caisse and montant_pour_caisse > 0:
+                try:
+                    caisse = CaisseInscription.get_caisse_actuelle()
+                    if caisse:
+                        desc = f"Inscription {self.membre.numero_membre} - Session {self.session.nom}"
+                        caisse.ajouter_montant(montant_pour_caisse, description=desc)
+                    else:
+                        print("Aucune caisse inscription actuelle trouvée")
+                except Exception as e:
+                    print(f"Erreur alimentation caisse inscription: {e}")
+
+            # 5) Mettre à jour inscription_terminee
             if is_new:
-                print('%%%%%%%%%%%mise a jour de insctiption_termine')
                 self.membre.update_inscription_terminee()
-                print(self.membre.update_inscription_terminee())
                 self.membre.save()
 
-            # Alimenter le fonds social
-#             if is_new:
-#                 from core.models import FondsSocial
-#                 fonds = FondsSocial.get_fonds_actuel()
-#                 if fonds:
-#                     fonds.ajouter_montant(
-#                         self.montant,
-#                         f"Inscription {self.membre.numero_membre} - Session {self.session.nom}"
-#                     )
-    
-    
+            # 6) Surplus vers épargne personnelle
+            if is_new and surplus_pour_epargne > 0:
+                try:
+                    EpargneTransaction.objects.create(
+                        membre=self.membre,
+                        type_transaction='DEPOT',
+                        montant=surplus_pour_epargne,
+                        session=self.session,
+                        notes="Surplus paiement inscription"
+                    )
+                    print(
+                        f"✅ Surplus {surplus_pour_epargne} FCFA ajouté à l'épargne de {self.membre.numero_membre}"
+                    )
+                except Exception as e:
+                    print(f"❌ Erreur épargne surplus inscription: {e}")
+
     def __str__(self):
         return f"{self.membre.numero_membre} - {self.montant:,.0f} FCFA ({self.date_paiement.date()})"
     
@@ -600,6 +622,25 @@ class Remboursement(models.Model):
         # Déterminer si c'est une création avant de sauvegarder
         is_new = self._state.adding
         
+        # 0. Calculer un éventuel surplus de remboursement AVANT la sauvegarde
+        surplus_pour_epargne = Decimal('0')
+        montant_pour_tresor = self.montant
+        if is_new and self.montant and self.montant > 0:
+            # Montant encore dû avant ce remboursement
+            restant_avant = max(
+                Decimal('0'),
+                self.emprunt.montant_total_a_rembourser - self.emprunt.montant_rembourse
+            )
+            if self.montant > restant_avant:
+                surplus_pour_epargne = self.montant - restant_avant
+                montant_pour_tresor = restant_avant
+                print(
+                    f"💰 Surplus remboursement détecté pour {self.emprunt.membre.numero_membre} : "
+                    f"{surplus_pour_epargne} FCFA (sera versé en épargne)"
+                )
+            else:
+                montant_pour_tresor = self.montant
+        
         # 1. Garder ta logique de calcul capital/intérêt
         if not self.montant_capital and not self.montant_interet:
             self._calculer_repartition_capital_interet()
@@ -619,15 +660,34 @@ class Remboursement(models.Model):
                 # Import local pour éviter les erreurs d'import circulaire
                 from .models import EpargneTransaction
                 
-                EpargneTransaction.objects.create(
-                    membre=self.emprunt.membre,
-                    session=self.session,
-                    montant=self.montant,
-                    type_transaction='RETOUR_REMBOURSEMENT',
-                    notes=f"Auto: Retour de fonds (Remboursement prêt #{self.emprunt.id})",
-                    date_transaction=self.date_remboursement
-                )
-                print(f"💰 Trésor mis à jour : +{self.montant} FCFA")
+                # Part qui va vraiment au trésor (remboursement de la dette)
+                if montant_pour_tresor > 0:
+                    EpargneTransaction.objects.create(
+                        membre=self.emprunt.membre,
+                        session=self.session,
+                        montant=montant_pour_tresor,
+                        type_transaction='RETOUR_REMBOURSEMENT',
+                        notes=f"Auto: Retour de fonds (Remboursement prêt #{self.emprunt.id})",
+                        date_transaction=self.date_remboursement
+                    )
+                    print(f"💰 Trésor mis à jour : +{montant_pour_tresor} FCFA")
+
+                # 4.b Si surplus, l'affecter à l'épargne personnelle du membre
+                if surplus_pour_epargne > 0:
+                    try:
+                        EpargneTransaction.objects.create(
+                            membre=self.emprunt.membre,
+                            session=self.session,
+                            montant=surplus_pour_epargne,
+                            type_transaction='DEPOT',
+                            notes=f"Surplus remboursement prêt #{self.emprunt.id}"
+                        )
+                        print(
+                            f"✅ Surplus de {surplus_pour_epargne} FCFA ajouté à l'épargne "
+                            f"du membre {self.emprunt.membre.numero_membre}"
+                        )
+                    except Exception as e:
+                        print(f"❌ Erreur création EpargneTransaction (surplus remboursement): {e}")
             except Exception as e:
                 print(f"❌ Erreur création EpargneTransaction: {e}")
 
@@ -853,6 +913,25 @@ class PaiementRenflouement(models.Model):
         is_new = getattr(self._state, 'adding', True)
         from django.db import transaction as _transaction
         from core.models import FondsSocial
+        from decimal import Decimal
+
+        # Calculer un éventuel surplus AVANT la sauvegarde
+        surplus_pour_epargne = Decimal('0')
+        montant_pour_fonds = self.montant
+        if is_new and self.montant and self.montant > 0:
+            restant_avant = max(
+                Decimal('0'),
+                self.renflouement.montant_du - self.renflouement.montant_paye
+            )
+            if self.montant > restant_avant:
+                surplus_pour_epargne = self.montant - restant_avant
+                montant_pour_fonds = restant_avant
+                print(
+                    f"💰 Surplus renflouement détecté pour {self.renflouement.membre.numero_membre} : "
+                    f"{surplus_pour_epargne} FCFA (sera versé en épargne)"
+                )
+            else:
+                montant_pour_fonds = self.montant
 
         with _transaction.atomic():
             super().save(*args, **kwargs)
@@ -870,29 +949,33 @@ class PaiementRenflouement(models.Model):
                 print(f"Erreur de calcul de statut en règle: {e}")
 
             # Alimenter le fonds social pour les paiements de renflouement (nouveaux paiements uniquement)
-            if is_new and self.montant and self.montant > 0:
+            if is_new and montant_pour_fonds and montant_pour_fonds > 0:
                 try:
                     fonds = FondsSocial.get_fonds_actuel()
                     if fonds:
                         desc = f"Renflouement {self.renflouement.membre.numero_membre} - {self.renflouement.cause}"
-                        fonds.ajouter_montant(self.montant, description=desc)
-                        print(f"Debug: renflouement ajouté {self.montant}")
+                        fonds.ajouter_montant(montant_pour_fonds, description=desc)
+                        print(f"Debug: renflouement ajouté {montant_pour_fonds}")
                     else:
                         print("Aucun fonds social actuel trouvé pour renflouement.")
                 except Exception as e:
                     print(f"Erreur lors de l'alimentation du fonds social (renflouement): {e}")
-        
-        is_new = self.pk is None
-        # Mise à jour du montant payé du renflouement
-        self.renflouement.montant_paye = sum(
-            p.montant for p in self.renflouement.paiements.all()
-        )
-        self.renflouement.save()
-        try:
-            if self.renflouement.membre.calculer_statut_en_regle() :
-                self.renflouement.membre.statut = 'EN_REGLE'
-                self.renflouement.membre.save()
-        except :
-            print(f"Erreur de calcul de sttus en regle  ")
-            pass
+
+            # Créer la transaction d'épargne pour le surplus, le cas échéant
+            if is_new and surplus_pour_epargne > 0:
+                try:
+                    from .models import EpargneTransaction
+                    EpargneTransaction.objects.create(
+                        membre=self.renflouement.membre,
+                        session=self.session,
+                        montant=surplus_pour_epargne,
+                        type_transaction='DEPOT',
+                        notes=f"Surplus paiement renflouement #{self.renflouement.id}"
+                    )
+                    print(
+                        f"✅ Surplus de {surplus_pour_epargne} FCFA ajouté à l'épargne "
+                        f"du membre {self.renflouement.membre.numero_membre}"
+                    )
+                except Exception as e:
+                    print(f"❌ Erreur création EpargneTransaction (surplus renflouement): {e}")
                 
