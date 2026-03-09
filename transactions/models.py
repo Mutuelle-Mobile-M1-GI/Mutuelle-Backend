@@ -155,18 +155,24 @@ class PaiementSolidarite(models.Model):
                 self.montant_solidarite_du = config.montant_solidarite
                 print(f"💰 Solidarité session {self.session.nom}: montant dû = {self.montant_solidarite_du}")
 
-            # ✅ CORRECTION: Ne mettre à jour le statut que si on peut définir les statuts (≥3 sessions)
+            # ✅ NOUVELLE LOGIQUE: Période de grâce de 3 mois par exercice
             try:
                 from core.models import Membre
                 peut_definir_statuts = Membre.peut_definir_statuts_membre(membre=self.membre)
-
-                if peut_definir_statuts and self.membre.calculer_statut_en_regle():
+                
+                if not peut_definir_statuts:
+                    # Période de grâce: membre reste EN_REGLE
+                    print("⏳ SOLIDARITÉ: Période de grâce → membre reste EN_REGLE")
                     self.membre.statut = 'EN_REGLE'
                     self.membre.save()
-                elif peut_definir_statuts:
-                    # Si on peut définir les statuts mais membre n'est pas en règle
-                    self.membre.statut = 'NON_EN_REGLE'
-                    self.membre.save()
+                else:
+                    # Après période de grâce: évaluation normale
+                    if self.membre.calculer_statut_en_regle():
+                        self.membre.statut = 'EN_REGLE'
+                        self.membre.save()
+                    else:
+                        self.membre.statut = 'NON_EN_REGLE'
+                        self.membre.save()
             except Exception as e:
                 print(f"Erreur de calcul de statut en règle: {e}")
                 pass
@@ -447,18 +453,26 @@ class Emprunt(models.Model):
                 self.distribuer_interets_precomptes()
             
             # 🔧 ÉTAPE 9: Mise à jour du statut du membre (En règle ou non)
+            # ✅ NOUVELLE LOGIQUE: Période de grâce de 3 mois par exercice
             try:
                 from core.models import Membre
                 peut_definir_statuts = Membre.peut_definir_statuts_membre(membre=self.membre)
                 
-                if peut_definir_statuts and self.membre.calculer_statut_en_regle():
-                    print("SAUVEGARDE DE L'EMPRUNT ON VA VOIR SI IL EST EN REGLE ET IL L'EST ")
+                if not peut_definir_statuts:
+                    # Période de grâce: membre reste EN_REGLE
+                    print("⏳ EMPRUNT: Période de grâce → membre reste EN_REGLE")
                     self.membre.statut = 'EN_REGLE'
                     self.membre.save()
-                elif peut_definir_statuts:
-                    print("SAUVEGARDE DE L'EMPRUNT ON VA VOIR SI IL EST EN REGLE ET NE L'EST PAS DU TOUT ! ")
-                    self.membre.statut = 'NON_EN_REGLE'
-                    self.membre.save()
+                else:
+                    # Après période de grâce: évaluation normale
+                    if self.membre.calculer_statut_en_regle():
+                        print("✅ EMPRUNT: Membre en règle après période de grâce")
+                        self.membre.statut = 'EN_REGLE'
+                        self.membre.save()
+                    else:
+                        print("❌ EMPRUNT: Membre non en règle après période de grâce")
+                        self.membre.statut = 'NON_EN_REGLE'
+                        self.membre.save()
             except Exception as e:
                 print(f"Erreur de calcul de statut en règle: {e}")
                 pass
@@ -528,7 +542,7 @@ class Emprunt(models.Model):
         total_global = Decimal('0')
         epargnes_membres = []
     
-        tous_membres = Membre.objects.all()
+        tous_membres = Membre.objects.filter(actif=True)
         for m in tous_membres:
             e = m.calculer_epargne_pure()
             if e > 0:
