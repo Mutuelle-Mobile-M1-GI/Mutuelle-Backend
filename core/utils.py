@@ -258,27 +258,26 @@ def calculer_donnees_membre_completes(membre):
     }
     
     # 6. STATUT GLOBAL "EN RÈGLE"
-    # Un membre est en règle s'il a payé son inscription complètement
-    # et s'il n'a pas de retard critique sur les autres obligations excepter les renflouementsnt
-    from core.models import Membre
+    # ✅ NOUVELLE LOGIQUE: Période de grâce de 3 mois par exercice
     
+    from core.models import Membre
     peut_definir_statuts = Membre.peut_definir_statuts_membre(membre)
     
     if not peut_definir_statuts:
-        # Avant 3 sessions, on ne définit pas les statuts
-        en_regle = False  # Statut indéterminé
-        print(f"⏳ Membre {membre.numero_membre}: Statut non défini (< 3 sessions)")
+        # Période de grâce: tous les membres sont EN_REGLE
+        en_regle = True
+        print(f"⏳ Membre {membre.numero_membre}: Période de grâce → EN_REGLE par défaut")
     else:
-        # Après 3 sessions, on applique les règles normales
-
-        if solidarite_data['solidarite_a_jour'] :
-            print('%%%%%%%%%%%%%% solidarite a jour')
+        # Après 3 mois: évaluation selon les critères
+        if solidarite_data['solidarite_a_jour']:
+            print('✅ Solidarité à jour')
         else:
-            print('%%%%%%%%%%%%%% solidarite pas a jour')
-        if emprunt_data['montant_restant_a_rembourser'] < Decimal('100') :
-            print('%%%%%%%%%%%%%% emprunt restant < 100')
-        else :
-            print('%%%%%%%%%%%%%% emprunt restant >= 100')
+            print('❌ Solidarité pas à jour')
+            
+        if emprunt_data['montant_restant_a_rembourser'] < Decimal('100'):
+            print('✅ Emprunt restant < 100 FCFA')
+        else:
+            print('❌ Emprunt restant >= 100 FCFA')
 
         en_regle = (
             solidarite_data['solidarite_a_jour'] and
@@ -286,7 +285,7 @@ def calculer_donnees_membre_completes(membre):
             inscription_data['inscription_complete'] and
             emprunt_data['montant_restant_a_rembourser'] < Decimal('100')
         )
-        print(f"✅ Membre {membre.numero_membre}: En règle = {en_regle}")
+        print(f"✅ Membre {membre.numero_membre}: Évaluation après période de grâce = {en_regle}")
     
     # 7. DONNÉES CONSOLIDÉES
     donnees_completes = {

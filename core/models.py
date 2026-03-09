@@ -731,6 +731,29 @@ class Session(models.Model):
             self.mettre_a_jour_statuts_membres()
     
         
+    @classmethod
+    def initialiser_statuts_nouvel_exercice(cls):
+        """
+        ✅ NOUVELLE MÉTHODE: Initialise tous les membres à EN_REGLE au début d'un exercice
+        
+        À appeler lors de la création d'un nouvel exercice pour remettre
+        tous les membres en règle et démarrer la période de grâce de 3 mois.
+        """
+        from django.db import transaction
+        
+        membres = cls.objects.exclude(statut='SUSPENDU')
+        
+        print(f"🔄 Initialisation des statuts pour nouvel exercice: {membres.count()} membres")
+        
+        with transaction.atomic():
+            for membre in membres:
+                if membre.statut != 'EN_REGLE':
+                    membre.statut = 'EN_REGLE'
+                    membre.save()
+                    print(f"✅ {membre.numero_membre}: Statut initialisé → EN_REGLE")
+        
+        print(f"✅ Tous les membres sont maintenant EN_REGLE pour le nouvel exercice")
+    
     def mettre_a_jour_statuts_membres(self):
         """
         Met à jour le statut (EN_REGLE / NON_EN_REGLE) de tous les membres
@@ -745,18 +768,19 @@ class Session(models.Model):
 
         with transaction.atomic():
             for membre in membres:
+                # ✅ NOUVELLE LOGIQUE: Période de grâce de 3 mois par exercice
                 peut_definir_statuts = Membre.peut_definir_statuts_membre(membre)
-
+                
                 if not peut_definir_statuts:
-                    # ⏳ On ne touche pas au statut
-                    print(
-                        f"⏳ {membre.numero_membre} : "
-                        f"statut non définissable → {membre.statut}"
-                    )
+                    # Période de grâce: tous les membres sont EN_REGLE
+                    if membre.statut != 'EN_REGLE':
+                        membre.statut = 'EN_REGLE'
+                        membre.save()
+                        print(f"⏳ {membre.numero_membre}: Période de grâce → EN_REGLE")
                     continue
-
+                
+                # Après période de grâce: évaluation normale
                 est_en_regle = membre.calculer_statut_en_regle()
-
                 nouveau_statut = 'EN_REGLE' if est_en_regle else 'NON_EN_REGLE'
 
                 if membre.statut != nouveau_statut:
@@ -872,6 +896,12 @@ class Membre(models.Model):
         verbose_name="Inscription terminée",
         help_text="True si le membre a payé la totalité de son inscription"
     )
+    actif=models.BooleanField(
+        default=True,
+        verbose_name="Membre actif",
+        help_text="False si le membre ne fait plus partie de la mutuelle"
+    )
+    
 
     class Meta:
         verbose_name = "Membre"
@@ -884,7 +914,10 @@ class Membre(models.Model):
     @property
     def is_en_regle(self):
         return self.statut == 'EN_REGLE'
-    
+
+    @property
+    def is_actif(self):
+        return self.actif
 
     def calculer_epargne_pure(self):
    
@@ -917,6 +950,8 @@ class Membre(models.Model):
         """Vérifie si le membre peut emprunter un montant donné (nouvelle logique par tranches)"""
         from transactions.models import Emprunt
 
+        if not self.is_actif:
+            return False, "se membre ne fait plus partie de la mutuelle"
         # 1. Vérifier qu'il n'a pas d'emprunt en cours
         if Emprunt.objects.filter(membre=self, statut='EN_COURS').exists():
             return False, "Vous avez déjà un emprunt en cours"
@@ -991,82 +1026,45 @@ class Membre(models.Model):
     @classmethod
     def peut_definir_statuts_membre(cls, membre):
         """
-        Détermine si on peut attribuer un statut (EN_REGLE / NON_EN_REGLE)
-        à un membre donné.
+        ✅ NOUVELLE LOGIQUE: Période de grâce de 3 mois par exercice
 
-        Règle :
-        - Le membre doit avoir vécu AU MOINS 3 sessions (dans l'exercice actuel)
-        - Sessions TERMINÉES ou EN_COURS
-        
-        ✅ LOGIQUE CORRIGÉE :
-        - Si le membre s'est inscrit dans l'exercice EN_COURS : 
-          → Compter depuis sa session d'inscription
-        - Si le membre s'est inscrit dans un exercice TERMINE :
-          → Compter UNIQUEMENT les sessions du nouvel exercice EN_COURS
-          → (car son statut a été réinitialisé au changement d'exercice)
+        Règles:
+        - Au début de chaque exercice: tous les membres sont EN_REGLE
+        - Période de grâce: 3 mois avant d'évaluer les statuts
+        - Après 3 mois: évaluation selon les critères normaux
         """
-        from core.models import Session, Exercice
+        from core.models import Exercice
+        from datetime import timedelta
+        from django.utils import timezone
 
         # Récupérer l'exercice en cours
         exercice_actuel = Exercice.get_exercice_en_cours()
         if not exercice_actuel:
-            print(f"⏳ Membre {membre.numero_membre} : Pas d'exercice EN_COURS")
+            print(f"⏳ Membre {membre.numero_membre}: Pas d'exercice EN_COURS")
             return False
 
-        # 🔄 LOGIQUE : Le membre a-t-il la même date d'inscription que l'exercice actuel ?
-        # (i.e., s'est-il inscrit dans l'exercice EN_COURS ?)
-        if membre.exercice_inscription == exercice_actuel:
-            # ✅ CAS 1: Le membre s'est inscrit dans l'exercice EN_COURS
-            # → Compter depuis sa session d'inscription (logique originale)
-            sessions_membre = Session.objects.filter(
-                exercice=exercice_actuel,
-                date_session__gte=membre.session_inscription.date_session,
-                statut__in=['TERMINEE', 'EN_COURS']
-            ).order_by('date_session')
-            
-            nombre_sessions = sessions_membre.count()
-            
-            if nombre_sessions >= 3:
-                print(
-                    f"✅ Membre {membre.numero_membre} (inscrit cet exercice) : "
-                    f"{nombre_sessions} sessions → Statut définissable"
-                )
-                return True
-            else:
-                print(
-                    f"⏳ Membre {membre.numero_membre} (inscrit cet exercice) : "
-                    f"{nombre_sessions} session(s) → Statut NON définissable"
-                )
-                return False
+        # Calculer si 3 mois se sont écoulés depuis le début de l'exercice
+        debut_exercice = exercice_actuel.date_debut
+        date_limite_grace = debut_exercice + timedelta(days=90)  # 3 mois = 90 jours
+        aujourd_hui = timezone.now().date()
+
+        if aujourd_hui < date_limite_grace:
+            # Encore dans la période de grâce
+            jours_restants = (date_limite_grace - aujourd_hui).days
+            print(f"⏳ Membre {membre.numero_membre}: Période de grâce ({jours_restants} jours restants)")
+            return False
         else:
-            # ✅ CAS 2: Le membre s'est inscrit dans un exercice ANTÉRIEUR
-            # → Compter UNIQUEMENT les sessions de l'exercice EN_COURS
-            # (car son statut a été réinitialisé au changement d'exercice)
-            sessions_membre = Session.objects.filter(
-                exercice=exercice_actuel,
-                statut__in=['TERMINEE', 'EN_COURS']
-            ).order_by('date_session')
-            
-            nombre_sessions = sessions_membre.count()
-            
-            if nombre_sessions >= 3:
-                print(
-                    f"✅ Membre {membre.numero_membre} (ancien) : "
-                    f"{nombre_sessions} sessions du nouvel exercice → Statut définissable"
-                )
-                return True
-            else:
-                print(
-                    f"⏳ Membre {membre.numero_membre} (ancien) : "
-                    f"{nombre_sessions} session(s) du nouvel exercice → Statut NON définissable"
-                )
-                return False
+            # Période de grâce terminée, on peut évaluer
+            print(f"✅ Membre {membre.numero_membre}: Période de grâce terminée, évaluation possible")
+            return True
+
+
 
 
 
     def update_inscription_terminee(self):
         """
-        ✅ NOUVELLE MÉTHODE <-
+        NOUVELLE MÉTHODE <-
         Met à jour automatiquement le statut inscription_terminee
         """
         from transactions.models import PaiementInscription

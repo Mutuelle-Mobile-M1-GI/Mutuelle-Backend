@@ -28,6 +28,7 @@ THIRD_PARTY_APPS = [
     'rest_framework_simplejwt',
     'django_filters',
     'corsheaders',
+    'drf_spectacular',  # ✅ Ajout de drf_spectacular
 ]
 
 LOCAL_APPS = [
@@ -117,6 +118,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # Django REST Framework configuration
 REST_FRAMEWORK = {
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework_simplejwt.authentication.JWTAuthentication',
         'rest_framework.authentication.SessionAuthentication',
@@ -135,6 +137,17 @@ REST_FRAMEWORK = {
         'rest_framework.renderers.JSONRenderer',
         'rest_framework.renderers.BrowsableAPIRenderer',
     ],
+}
+
+# ✅ Configuration drf_spectacular pour Swagger
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Mutuelle API',
+    'DESCRIPTION': 'API de gestion de mutuelle avec fonctionnalités complètes',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    'SCHEMA_PATH_PREFIX': '/api/',
+    'COMPONENT_SPLIT_REQUEST': True,
+    'SORT_OPERATIONS': False,
 }
 
 # JWT Configuration

@@ -403,6 +403,59 @@ class MembreViewSet(viewsets.ModelViewSet):
             'membres_suspendus': suspendus,
             'pourcentage_en_regle': (en_regle / total * 100) if total > 0 else 0
         })
+    
+    @action(detail=True, methods=['post'], permission_classes=[IsAdministrateur])
+    def desactiver(self, request, pk=None):
+        """
+        Désactive un membre (il ne recevra plus les intérêts redistribués)
+        """
+        membre = self.get_object()
+        
+        if not membre.actif:
+            return Response({
+                'error': 'Le membre est déjà désactivé'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Vérifier s'il a un emprunt en cours
+        from transactions.models import Emprunt
+        emprunt_en_cours = Emprunt.objects.filter(
+            membre=membre, 
+            statut__in=['EN_COURS', 'EN_RETARD']
+        ).exists()
+        
+        if emprunt_en_cours:
+            return Response({
+                'error': 'Impossible de désactiver un membre avec un emprunt en cours',
+                'details': 'Le membre doit d\'abord rembourser son emprunt'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        membre.actif = False
+        membre.save()
+        
+        return Response({
+            'message': f'Membre {membre.numero_membre} désactivé avec succès',
+            'membre': MembreSerializer(membre).data
+        })
+    
+    @action(detail=True, methods=['post'], permission_classes=[IsAdministrateur])
+    def activer(self, request, pk=None):
+        """
+        Réactive un membre désactivé
+        """
+        membre = self.get_object()
+        
+        if membre.actif:
+            return Response({
+                'error': 'Le membre est déjà actif'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        membre.actif = True
+        membre.save()
+        
+        return Response({
+            'message': f'Membre {membre.numero_membre} activé avec succès',
+            'membre': MembreSerializer(membre).data
+        })
 
 
 
