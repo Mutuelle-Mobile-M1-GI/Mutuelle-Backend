@@ -209,3 +209,25 @@ LOGGING = {
         },
     },
 }
+# Configuration pour Swagger (drf-spectacular)
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'API Mutuelle Backend',
+    'DESCRIPTION': 'Documentation interactive pour l\'application de gestion de mutuelle',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    # Configuration pour l'authentification JWT
+    'SECURITY': [
+        {
+            'jwtAuth': [],
+        }
+    ],
+    'APPEND_COMPONENTS': {
+        "securitySchemes": {
+            "jwtAuth": {
+                "type": "http",
+                "scheme": "bearer",
+                "bearerFormat": "JWT",
+            }
+        }
+    },
+}

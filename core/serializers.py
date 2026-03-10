@@ -64,7 +64,8 @@ class SessionSerializer(serializers.ModelSerializer):
         model = Session
         fields = [
             'id', 'exercice', 'exercice_nom', 'nom', 'date_session', 
-            'montant_collation', 'statut', 'description', 'is_en_cours',
+            'montant_collation', 'montant_autre_depense', 'motif_autre_depense',
+            'statut', 'description', 'is_en_cours',
             'nombre_membres_inscrits', 'total_solidarite_collectee',
             'renflouements_generes', 'date_creation', 'date_modification'
         ]

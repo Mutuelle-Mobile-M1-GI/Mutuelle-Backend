@@ -593,6 +593,16 @@ class Session(models.Model):
         validators=[MinValueValidator(0)],
         verbose_name="Montant collation (FCFA)"
     )
+    # Nouvelle option : autres dépenses ponctuelles de la session
+    montant_autre_depense = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0,
+        validators=[MinValueValidator(0)],
+        verbose_name="Autre dépense (FCFA)"
+    )
+    motif_autre_depense = models.TextField(
+        blank=True,
+        verbose_name="Motif autre dépense"
+    )
     statut = models.CharField(max_length=10, choices=STATUS_CHOICES, default='EN_COURS', verbose_name="Statut")
     description = models.TextField(blank=True, verbose_name="Description")
     date_creation = models.DateTimeField(auto_now_add=True)
@@ -682,13 +692,18 @@ class Session(models.Model):
         # 4. Vérification préliminaire du Fonds Social
         is_first_session = (Session.objects.count() == 0) if is_new else False
         
-        # On vérifie si on s'apprête à activer une session avec collation
-        if self.statut == 'EN_COURS' and not was_en_cours and self.montant_collation > 0 and not is_first_session:
-            fonds = FondsSocial.get_fonds_actuel()
-            if not fonds or fonds.montant_total < self.montant_collation:
-                dispo = fonds.montant_total if fonds else 0
-                raise ValidationError(f"❌ Fonds social insuffisant. Dispo: {dispo} FCFA")
-            print(f"✅ Vérification fonds social OK : {fonds.montant_total:,.0f} FCFA")
+        # On vérifie si on s'apprête à activer une session avec collation / autres dépenses
+        if self.statut == 'EN_COURS' and not was_en_cours and not is_first_session:
+            montant_total_retrait = (self.montant_collation or 0) + (self.montant_autre_depense or 0)
+            if montant_total_retrait > 0:
+                fonds = FondsSocial.get_fonds_actuel()
+                if not fonds or fonds.montant_total < montant_total_retrait:
+                    dispo = fonds.montant_total if fonds else 0
+                    raise ValidationError(
+                        f"❌ Fonds social insuffisant. "
+                        f"Requis: {montant_total_retrait:,.0f} FCFA, Dispo: {dispo:,.0f} FCFA"
+                    )
+                print(f"✅ Vérification fonds social OK : {fonds.montant_total:,.0f} FCFA")
 
         # 5. EXECUTION ATOMIQUE
         with transaction.atomic():
@@ -706,11 +721,11 @@ class Session(models.Model):
             # 6. Actions déclenchées uniquement lors du PASSAGE à 'EN_COURS'
             if self.statut == 'EN_COURS' and not was_en_cours:
                 
-                # A. Retrait de la collation
-                if self.montant_collation > 0 and not is_first_session:
+                # A. Retrait de la collation + autres dépenses éventuelles
+                if (self.montant_collation > 0 or self.montant_autre_depense > 0) and not is_first_session:
                     if hasattr(self, '_retirer_collation_fonds_social'):
                         if not self._retirer_collation_fonds_social():
-                            raise ValidationError("❌ Échec du retrait de la collation.")
+                            raise ValidationError("❌ Échec du retrait de la collation / autres dépenses.")
 
                 # B. Clôture de l'ancienne session
                 if previous:
@@ -782,7 +797,8 @@ class Session(models.Model):
 
     def _retirer_collation_fonds_social(self):
         """
-        Retire le montant de la collation du fonds social
+        Retire le montant de la collation (et éventuellement une autre dépense)
+        du fonds social.
         Enregistre aussi la dépense pour le renflouement de fin d'exercice
         
         Returns:
@@ -798,29 +814,55 @@ class Session(models.Model):
             
             print(f"💰 Fonds social avant retrait : {fonds.montant_total:,.0f} FCFA")
             
-            # Retirer le montant
-            if not fonds.retirer_montant(
-                self.montant_collation,
-                f"Collation Session {self.nom} - {self.date_session}"
-            ):
-                print(f"❌ ERREUR : Échec du retrait de {self.montant_collation:,.0f} FCFA")
-                return False
-            
-            # Enregistrer la dépense pour le renflouement
-            try:
-                DépenseExercice.objects.create(
-                    exercice=self.exercice,
-                    type_depense='COLLATION',
-                    montant=self.montant_collation,
-                    description=f"Collation Session {self.nom} - {self.date_session}",
-                    session=self
-                )
-                print(f"   📋 Dépense collation enregistrée: {self.montant_collation:,.0f} FCFA")
-            except Exception as e:
-                print(f"⚠️  Erreur lors de l'enregistrement de la dépense collation: {e}")
+            # 1) Retrait collation
+            if self.montant_collation > 0:
+                if not fonds.retirer_montant(
+                    self.montant_collation,
+                    f"Collation Session {self.nom} - {self.date_session}"
+                ):
+                    print(f"❌ ERREUR : Échec du retrait de {self.montant_collation:,.0f} FCFA (collation)")
+                    return False
+                try:
+                    DépenseExercice.objects.create(
+                        exercice=self.exercice,
+                        type_depense='COLLATION',
+                        montant=self.montant_collation,
+                        description=f"Collation Session {self.nom} - {self.date_session}",
+                        session=self
+                    )
+                    print(f"   📋 Dépense collation enregistrée: {self.montant_collation:,.0f} FCFA")
+                except Exception as e:
+                    print(f"⚠️  Erreur lors de l'enregistrement de la dépense collation: {e}")
+
+            # 2) Retrait autre dépense éventuelle
+            if self.montant_autre_depense > 0:
+                if not fonds.retirer_montant(
+                    self.montant_autre_depense,
+                    f"Autre dépense Session {self.nom} - {self.date_session} ({self.motif_autre_depense})"
+                ):
+                    print(f"❌ ERREUR : Échec du retrait de {self.montant_autre_depense:,.0f} FCFA (autre dépense)")
+                    return False
+                try:
+                    DépenseExercice.objects.create(
+                        exercice=self.exercice,
+                        type_depense='AUTRE',
+                        montant=self.montant_autre_depense,
+                        description=(
+                            f"Autre dépense Session {self.nom} - {self.date_session}: "
+                            f"{self.motif_autre_depense}"
+                        ),
+                        session=self
+                    )
+                    print(f"   📋 Autre dépense enregistrée: {self.montant_autre_depense:,.0f} FCFA")
+                except Exception as e:
+                    print(f"⚠️  Erreur lors de l'enregistrement de l'autre dépense: {e}")
             
             print(f"💰 Fonds social après retrait : {fonds.montant_total:,.0f} FCFA")
-            print(f"✅ {self.montant_collation:,.0f} FCFA retirés du fonds social")
+            print(
+                f"✅ Retraits session: "
+                f"collation={self.montant_collation:,.0f} FCFA, "
+                f"autre={self.montant_autre_depense:,.0f} FCFA"
+            )
             return True
             
         except Exception as e:
