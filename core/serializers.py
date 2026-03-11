@@ -70,21 +70,8 @@ class SessionSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         """
-        Logique de transition : clôture l'ancienne session avant de valider la nouvelle.
+        Validation simple sans modifications de base de données
         """
-        statut = attrs.get('statut', 'EN_COURS')
-        exercice = attrs.get('exercice')
-
-        # Si on crée une nouvelle session (pas d'ID encore) en mode EN_COURS
-        if not self.instance and statut == 'EN_COURS' and exercice:
-            # On cherche l'ancienne session en cours pour cet exercice
-            # On utilise .update() car cela ne déclenche pas les signaux/clean
-            # et libère immédiatement la contrainte UniqueConstraint en DB.
-            Session.objects.filter(
-                exercice=exercice, 
-                statut='EN_COURS'
-            ).update(statut='TERMINEE')
-            
         return super().validate(attrs)
     
     def get_nombre_membres_inscrits(self, obj):
@@ -160,7 +147,7 @@ class MembreSerializer(serializers.ModelSerializer):
     Serializer pour les membres AVEC TOUTES LES DONNÉES CALCULÉES
     C'est LE serializer le plus important pour le frontend !
     """
-    utilisateur = UtilisateurSerializer(read_only=True)
+    utilisateur = UtilisateurSerializer(read_only=False, required=False)
     exercice_inscription_nom = serializers.CharField(source='exercice_inscription.nom', read_only=True)
     session_inscription_nom = serializers.CharField(source='session_inscription.nom', read_only=True)
     is_en_regle = serializers.ReadOnlyField()
@@ -177,6 +164,37 @@ class MembreSerializer(serializers.ModelSerializer):
             'is_en_regle', 'donnees_financieres',
             'date_creation', 'date_modification'
         ]
+    
+    def create(self, validated_data):
+        """
+        Crée un Membre avec un Utilisateur imbriqué
+        """
+        from django.contrib.auth import get_user_model
+        from django.db import transaction
+        
+        User = get_user_model()
+        utilisateur_data = validated_data.pop('utilisateur', None)
+        
+        with transaction.atomic():
+            # Créer l'utilisateur si les données sont fournies
+            if utilisateur_data:
+                # Extraire le mot de passe avant de créer l'utilisateur
+                password = utilisateur_data.pop('password', None)
+                
+                # Créer l'utilisateur
+                utilisateur = User.objects.create_user(**utilisateur_data)
+                
+                # Définir le mot de passe (qui sera hashé)
+                if password:
+                    utilisateur.set_password(password)
+                    utilisateur.save()
+                
+                validated_data['utilisateur'] = utilisateur
+            
+            # Créer le Membre
+            membre = Membre.objects.create(**validated_data)
+        
+        return membre
     
     def get_donnees_financieres(self, obj):
         """

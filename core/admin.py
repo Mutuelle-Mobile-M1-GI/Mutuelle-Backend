@@ -160,7 +160,7 @@ class MembreAdmin(admin.ModelAdmin):
     statut_formate.short_description = 'Statut'
     
     def epargne_totale(self, obj):
-        epargne = obj.calculer_epargne_totale()
+        epargne = obj.calculer_epargne_pure()
         return f"{epargne:,.0f} FCFA"
     epargne_totale.short_description = 'Épargne'
     
