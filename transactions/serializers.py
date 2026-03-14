@@ -6,7 +6,7 @@ from .models import (
     Emprunt, Remboursement, AssistanceAccordee, Renflouement,
     PaiementRenflouement
 )
-from core.models import DépenseExercice
+from core.models import DépenseExercice, ConfigurationMutuelle
 from core.serializers import MembreSimpleSerializer, SessionSerializer, TypeAssistanceSerializer
 import logging
 from rest_framework.response import Response
@@ -32,13 +32,27 @@ class PaiementInscriptionSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, data):
-        """Un seul paiement d'inscription par membre."""
+        """Un seul paiement d'inscription par membre et montant complet requis."""
+        # Vérifier qu'un membre n'a pas déjà payé son inscription
         if self.instance is None and data.get('membre'):
             if PaiementInscription.objects.filter(membre=data['membre']).exists():
                 raise serializers.ValidationError({
                     'membre': "Ce membre a déjà effectué son paiement d'inscription. "
                               "L'inscription se fait en une seule tranche."
                 })
+        
+        # Vérifier que le montant payé est égal au montant d'inscription configuré
+        if data.get('montant'):
+            config = ConfigurationMutuelle.get_configuration()
+            montant_requis = config.montant_inscription
+            
+            if data['montant'] < montant_requis:
+                raise serializers.ValidationError({
+                    'montant': f"Le paiement d'inscription doit être complet. "
+                              f"Montant requis: {montant_requis:,.0f} FCFA. "
+                              f"Vous avez payé: {data['montant']:,.0f} FCFA."
+                })
+        
         return data
 
 
