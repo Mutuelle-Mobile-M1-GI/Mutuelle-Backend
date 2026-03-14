@@ -921,6 +921,7 @@ class Membre(models.Model):
         verbose_name="Inscription terminée",
         help_text="True si le membre a payé la totalité de son inscription"
     )
+    actif = models.BooleanField(default=True, verbose_name="Actif")
 
     class Meta:
         verbose_name = "Membre"
