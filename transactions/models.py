@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 from logging import config
 from django.db import models
 from django.core.validators import MinValueValidator
@@ -911,7 +910,6 @@ class PaiementRenflouement(models.Model):
             print(f"Erreur de calcul de sttus en regle  ")
             pass
                 
-=======
 from logging import config
 from django.db import models
 from django.core.validators import MinValueValidator
@@ -1893,4 +1891,3 @@ class PaiementRenflouement(models.Model):
                 except Exception as e:
                     print(f"❌ Erreur création EpargneTransaction (surplus renflouement): {e}")
                 
->>>>>>> caisseinscription
