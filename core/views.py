@@ -300,6 +300,31 @@ class SessionViewSet(viewsets.ModelViewSet):
         return Response({'detail': 'Aucune session en cours'}, status=404)
     
     @action(detail=True, methods=['patch'], permission_classes=[IsAdminOrReadOnly])
+    def clore(self, request, pk=None):
+        """
+        Clore une session EN_COURS en la passant au statut TERMINEE
+        """
+        session = self.get_object()
+        
+        # Vérifier que c'est une session en cours
+        if session.statut != 'EN_COURS':
+            return Response({
+                'error': 'Impossible de clore cette session',
+                'details': f'Seules les sessions EN_COURS peuvent être clôturées. Statut actuel: {session.statut}'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Passer le statut à TERMINEE
+        session.statut = 'TERMINEE'
+        session.save()
+        
+        serializer = self.get_serializer(session)
+        
+        return Response({
+            'message': f'Session "{session.nom}" clôturée avec succès',
+            'data': serializer.data
+        }, status=status.HTTP_200_OK)
+    
+    @action(detail=True, methods=['patch'], permission_classes=[IsAdminOrReadOnly])
     def update_params(self, request, pk=None):
         """
         Modifie les paramètres simples d'une session en cours
