@@ -115,6 +115,21 @@ class CreerMembreCompletSerializer(serializers.Serializer):
             raise serializers.ValidationError("Un utilisateur avec ce nom d'utilisateur existe déjà")
         return value
     
+    def validate_montant_inscription_initial(self, value):
+        """Valider que le montant initial est suffisant pour l'inscription complète."""
+        if value and value > 0:
+            from core.models import ConfigurationMutuelle
+            config = ConfigurationMutuelle.get_configuration()
+            montant_requis = config.montant_inscription
+            
+            if value < montant_requis:
+                raise serializers.ValidationError(
+                    f"Le paiement d'inscription doit être complet. "
+                    f"Montant requis: {montant_requis:,.0f} FCFA. "
+                    f"Vous avez indiqué: {value:,.0f} FCFA."
+                )
+        return value
+    
     # administration/serializers.py
 
 # administration/serializers.py

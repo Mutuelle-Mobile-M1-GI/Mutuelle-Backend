@@ -219,4 +219,3 @@ LOGGING = {
             'propagate': False,
         },
     },
-}

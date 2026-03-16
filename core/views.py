@@ -5,13 +5,14 @@ from rest_framework.permissions import AllowAny
 from django_filters import rest_framework as filters
 from django.db import models
 from .models import (
-    ConfigurationMutuelle, Exercice, Session, TypeAssistance, 
-    Membre, FondsSocial, EmpruntCoefficientTier
+    ConfigurationMutuelle, Exercice, Session, TypeAssistance,
+    Membre, FondsSocial, CaisseInscription, EmpruntCoefficientTier
 )
 from .serializers import (
     ConfigurationMutuelleSerializer, ExerciceSerializer, SessionSerializer,
     TypeAssistanceSerializer, MembreSerializer, FondsSocialSerializer,
-    DonneesAdministrateurSerializer,EmpruntCoefficientTierSerializer
+    CaisseInscriptionSerializer, DonneesAdministrateurSerializer,
+    EmpruntCoefficientTierSerializer
 )
 from .utils import calculer_donnees_administrateur
 from authentication.permissions import IsAdministrateur, IsAdminOrReadOnly
@@ -662,6 +663,29 @@ class FondsSocialViewSet(viewsets.ReadOnlyModelViewSet):
             serializer = self.get_serializer(fonds)
             return Response(serializer.data)
         return Response({'detail': 'Aucun fonds social actuel'}, status=404)
+
+
+class CaisseInscriptionViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet pour la caisse inscription (lecture seule)
+    """
+    queryset = CaisseInscription.objects.select_related('exercice').all()
+    serializer_class = CaisseInscriptionSerializer
+    filterset_fields = ['exercice']
+    ordering = ['-date_modification']
+    permission_classes = [AllowAny]
+
+    @action(detail=False, methods=['get'], permission_classes=[AllowAny])
+    def current(self, request):
+        """
+        Retourne la caisse inscription actuelle (exercice en cours)
+        """
+        caisse = CaisseInscription.get_caisse_actuelle()
+        if caisse:
+            serializer = self.get_serializer(caisse)
+            return Response(serializer.data)
+        return Response({'detail': 'Aucune caisse inscription actuelle'}, status=404)
+
 
 @action(detail=False, methods=['get'], permission_classes=[IsAdministrateur])
 def donnees_administrateur(request):
