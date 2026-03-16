@@ -106,10 +106,12 @@ class Interet(models.Model):
     
     # L'emprunt qui a généré cet intérêt
     emprunt_source = models.ForeignKey(
-        'transactions.Emprunt', # Ajuste le chemin selon ton dossier transactions
+        'transactions.Emprunt',
         on_delete=models.CASCADE,
         related_name='redistributions',
-        verbose_name="Emprunt source"
+        verbose_name="Emprunt source",
+        null=True,
+        blank=True
     )
     
     # Contexte temporel
