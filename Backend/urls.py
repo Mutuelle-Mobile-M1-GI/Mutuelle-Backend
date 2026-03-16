@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 from django.contrib import admin
 from django.urls import path, include
 from django.conf import settings
@@ -38,7 +37,6 @@ if settings.DEBUG:
 # Configuration de l'admin
 admin.site.site_header = "Administration Mutuelle Enseignants ENSPY"
 admin.site.site_title = "Mutuelle ENSPY"
-=======
 from django.contrib import admin
 from django.urls import path, include
 from django.conf import settings
@@ -80,5 +78,4 @@ if settings.DEBUG:
 # Configuration de l'admin
 admin.site.site_header = "Administration Mutuelle Enseignants ENSPY"
 admin.site.site_title = "Mutuelle ENSPY"
->>>>>>> caisseinscription
 admin.site.index_title = "Tableau de bord"
