@@ -698,14 +698,16 @@ class Session(models.Model):
         if self.statut == 'EN_COURS' and not was_en_cours and not is_first_session:
             montant_total_retrait = (self.montant_collation or 0) + (self.montant_autre_depense or 0)
             if montant_total_retrait > 0:
-                fonds = FondsSocial.get_fonds_actuel()
-                if not fonds or fonds.montant_total < montant_total_retrait:
-                    dispo = fonds.montant_total if fonds else 0
+                # Les dépenses de collations et autres sont payées depuis la caisse d'inscription
+                from core.models import CaisseInscription
+                caisse = CaisseInscription.get_caisse_actuelle()
+                if not caisse or caisse.montant_total < montant_total_retrait:
+                    dispo = caisse.montant_total if caisse else 0
                     raise ValidationError(
-                        f"❌ Fonds social insuffisant. "
+                        f"❌ Caisse d'inscription insuffisante. "
                         f"Requis: {montant_total_retrait:,.0f} FCFA, Dispo: {dispo:,.0f} FCFA"
                     )
-                print(f"✅ Vérification fonds social OK : {fonds.montant_total:,.0f} FCFA")
+                print(f"✅ Vérification caisse d'inscription OK : {caisse.montant_total:,.0f} FCFA")
 
         # 5. EXECUTION ATOMIQUE
         with transaction.atomic():
@@ -831,18 +833,18 @@ class Session(models.Model):
             bool: True si succès, False si échec
         """
         try:
-            from core.models import FondsSocial
+            from core.models import CaisseInscription
             
-            fonds = FondsSocial.get_fonds_actuel()
-            if not fonds:
-                print("❌ ERREUR : Aucun fonds social actuel trouvé")
+            caisse = CaisseInscription.get_caisse_actuelle()
+            if not caisse:
+                print("❌ ERREUR : Aucune caisse d'inscription actuelle trouvée")
                 return False
             
-            print(f"💰 Fonds social avant retrait : {fonds.montant_total:,.0f} FCFA")
+            print(f"💰 Caisse inscription avant retrait : {caisse.montant_total:,.0f} FCFA")
             
             # 1) Retrait collation
             if self.montant_collation > 0:
-                if not fonds.retirer_montant(
+                if not caisse.retirer_montant(
                     self.montant_collation,
                     f"Collation Session {self.nom} - {self.date_session}"
                 ):
@@ -862,7 +864,7 @@ class Session(models.Model):
 
             # 2) Retrait autre dépense éventuelle
             if self.montant_autre_depense > 0:
-                if not fonds.retirer_montant(
+                if not caisse.retirer_montant(
                     self.montant_autre_depense,
                     f"Autre dépense Session {self.nom} - {self.date_session} ({self.motif_autre_depense})"
                 ):
@@ -883,7 +885,7 @@ class Session(models.Model):
                 except Exception as e:
                     print(f"⚠️  Erreur lors de l'enregistrement de l'autre dépense: {e}")
             
-            print(f"💰 Fonds social après retrait : {fonds.montant_total:,.0f} FCFA")
+            print(f"💰 Caisse inscription après retrait : {caisse.montant_total:,.0f} FCFA")
             print(
                 f"✅ Retraits session: "
                 f"collation={self.montant_collation:,.0f} FCFA, "
@@ -1305,6 +1307,31 @@ class CaisseInscription(models.Model):
             description=description
         )
         print(f"Caisse inscription (via F()): +{montant:,.0f} FCFA - {description}")
+
+    def retirer_montant(self, montant, description=""):
+        """Retire un montant de la caisse inscription."""
+        if montant <= 0:
+            return True
+
+        if self.montant_total >= montant:
+            CaisseInscription.objects.filter(pk=self.pk).update(
+                montant_total=F('montant_total') - montant,
+                date_modification=timezone.now()
+            )
+            self.refresh_from_db()
+            MouvementCaisseInscription.objects.create(
+                caisse_inscription=self,
+                type_mouvement='SORTIE',
+                montant=montant,
+                description=description
+            )
+            print(f"Caisse inscription: -{montant:,.0f} FCFA - {description}")
+            return True
+        else:
+            print(
+                f"ERREUR: Caisse inscription insuffisante. Disponible: {self.montant_total:,.0f}, Demandé: {montant:,.0f}"
+            )
+            return False
 
 
 class MouvementCaisseInscription(models.Model):
