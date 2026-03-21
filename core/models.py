@@ -353,12 +353,37 @@ class Exercice(models.Model):
                     else:
                         print(f"⚠️ FondsSocial existant pour {self.nom}")
 
-                    # 6️⃣ Créer la caisse inscription pour le nouvel exercice (départ à 0)
-                    CaisseInscription.objects.get_or_create(
+                    # 6️⃣ Transférer la caisse inscription de l'exercice précédent
+                    montant_caisse_conserver = Decimal('0')
+                    if previous_current_exercice:
+                        try:
+                            ancienne_caisse = CaisseInscription.objects.get(exercice=previous_current_exercice)
+                            montant_caisse_conserver = ancienne_caisse.montant_total
+                        except CaisseInscription.DoesNotExist:
+                            montant_caisse_conserver = Decimal('0')
+                            print(f"⚠️ Aucune caisse inscription trouvée pour {previous_current_exercice.nom}")
+
+                    nouvelle_caisse, caisse_created = CaisseInscription.objects.get_or_create(
                         exercice=self,
-                        defaults={'montant_total': Decimal('0')}
+                        defaults={'montant_total': montant_caisse_conserver}
                     )
-                    print(f"✅ Caisse inscription créée ou déjà existante pour {self.nom}")
+
+                    if caisse_created:
+                        print(f"✅ Nouvelle caisse inscription créée pour {self.nom}")
+                        print(f"   Montant conservé: {montant_caisse_conserver:,.0f} FCFA")
+                        if montant_caisse_conserver > 0:
+                            MouvementCaisseInscription.objects.create(
+                                caisse_inscription=nouvelle_caisse,
+                                type_mouvement='ENTREE',
+                                montant=montant_caisse_conserver,
+                                description=(
+                                    f"Transfert caisse inscription de {previous_current_exercice.nom} "
+                                    f"à {self.nom}"
+                                )
+                            )
+                            print(f"📝 Mouvement caisse inscription enregistré : Transfert de {montant_caisse_conserver:,.0f} FCFA")
+                    else:
+                        print(f"⚠️ Caisse inscription existante pour {self.nom}, montant actuel {nouvelle_caisse.montant_total:,.0f} FCFA")
                         
                 except Exception as e:
                     print(f"❌ ERREUR lors de la gestion FondsSocial / CaisseInscription: {e}")
