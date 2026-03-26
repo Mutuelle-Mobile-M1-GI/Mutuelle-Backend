@@ -104,63 +104,67 @@ def calculer_donnees_membre_completes(membre):
     inscription_data = {
         'montant_total_inscription': montant_total_inscription,
         'montant_paye_inscription': total_paye_inscription,
-        'montant_restant_inscription': montant_total_inscription - total_paye_inscription,
+        'montant_restant_inscription': max(montant_total_inscription - total_paye_inscription,0),
         'inscription_complete': membre.inscription_terminee,
         'pourcentage_inscription': (total_paye_inscription / montant_total_inscription * 100) 
                                    if montant_total_inscription > 0 else 0
     }
     
-    # 2. SOLIDARITÉ (SESSION COURANTE + CUMUL DES DETTES) ✅ AMÉLIORÉ
-    solidarite_data = {'sessions_impayees': []}
-    
-    if session_courante:
-        # Solidarité pour la session courante
-        paiement_session_courante = PaiementSolidarite.objects.filter(
+    # 2. SOLIDARITÉ (EXERCICE ENTIER, PAIEMENTS PAR TRANCHE)
+    solidarite_data = {}
+
+    exercice_courant = Exercice.get_exercice_en_cours()
+    if exercice_courant:
+        # Montant de base de la solidarité (config)
+        montant_solidarite_base = config.montant_solidarite
+
+        # Vérifier s'il y a un report (dette ou surplus) de l'exercice précédent
+        from core.models import SolidariteExerciceReport
+        report = SolidariteExerciceReport.objects.filter(
             membre=membre,
-            session=session_courante
+            exercice_cible=exercice_courant
+        ).first()
+
+        montant_reporte = report.montant_reporte if report else Decimal('0')
+        # total_solidarite_due = base + dette reportée - surplus reporté (min 0)
+        total_solidarite_due = max(montant_solidarite_base + montant_reporte, Decimal('0'))
+
+        total_solidarite_payee = PaiementSolidarite.objects.filter(
+            membre=membre,
+            session__exercice=exercice_courant
         ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
-        
+
         solidarite_data.update({
-            'montant_solidarite_session_courante': config.montant_solidarite,
-            'montant_paye_session_courante': paiement_session_courante,
-            'montant_restant_session_courante': config.montant_solidarite - paiement_session_courante,
-            'solidarite_session_courante_complete': paiement_session_courante >= config.montant_solidarite
+            'exercice': exercice_courant.nom,
+            'montant_solidarite_base': montant_solidarite_base,
+            'montant_reporte': montant_reporte,  # + = dette, - = surplus
+            'total_solidarite_due': total_solidarite_due,
+            'total_solidarite_payee': total_solidarite_payee,
+            'dette_solidarite_cumul': max(total_solidarite_due - total_solidarite_payee, Decimal('0')),
+            'solidarite_a_jour': total_solidarite_payee >= total_solidarite_due
         })
-    
-    # ✅ CALCUL CORRIGÉ DU CUMUL DES DETTES
-    # Utiliser les montants RÉELS dus (historiques) et non le montant actuel
-    sessions_depuis_inscription = Session.objects.filter(
-        date_session__gte=membre.session_inscription.date_session,
-        statut__in=['EN_COURS', 'TERMINEE']
-    )
-    
-    # Calculer le total réellement dû en additionnant les montants_solidarite_du
-    total_solidarite_due = Decimal('0')
-    for session in sessions_depuis_inscription:
-        # Vérifier s'il y a eu un paiement pour cette session
-        print(session)
-        premier_paiement = PaiementSolidarite.objects.filter(
-            membre=membre,
-            session=session
-        ).order_by('date_paiement').first()
-        
-        if premier_paiement:
-            # Utiliser le montant historique enregistré
-            total_solidarite_due += premier_paiement.montant_solidarite_du
-        else:
-            # Session non payée, utiliser le montant actuel de la config
-            total_solidarite_due += config.montant_solidarite
-    
-    total_solidarite_payee = PaiementSolidarite.objects.filter(
-        membre=membre,
-    ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
-    
-    solidarite_data.update({
-        'total_solidarite_due': total_solidarite_due,
-        'total_solidarite_payee': total_solidarite_payee,
-        'dette_solidarite_cumul': total_solidarite_due - total_solidarite_payee,
-        'solidarite_a_jour': total_solidarite_payee >= total_solidarite_due
-    })
+
+        if session_courante:
+            solidarite_data.update({
+                'montant_solidarite_session_courante': max(total_solidarite_due - total_solidarite_payee, Decimal('0')),
+                'montant_paye_session_courante': PaiementSolidarite.objects.filter(
+                    membre=membre,
+                    session=session_courante
+                ).aggregate(total=Sum('montant'))['total'] or Decimal('0'),
+                'montant_restant_session_courante': max(total_solidarite_due - total_solidarite_payee, Decimal('0')),
+                'solidarite_session_courante_complete': total_solidarite_payee >= total_solidarite_due
+            })
+    else:
+        solidarite_data.update({
+            'exercice': None,
+            'montant_solidarite_base': Decimal('0'),
+            'montant_reporte': Decimal('0'),
+            'total_solidarite_due': Decimal('0'),
+            'total_solidarite_payee': Decimal('0'),
+            'dette_solidarite_cumul': Decimal('0'),
+            'solidarite_a_jour': False
+        })
+
     
     # 3. ÉPARGNES ET INTÉRÊTS
     transactions_epargne = EpargneTransaction.objects.filter(membre=membre)
