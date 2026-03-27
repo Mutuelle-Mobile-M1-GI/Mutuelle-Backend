@@ -937,8 +937,8 @@ class PaiementSolidarite(models.Model):
     montant_solidarite_du = models.DecimalField(
         max_digits=12, decimal_places=2,
         validators=[MinValueValidator(0)],
-        verbose_name="Montant dû pour cette session (FCFA)",
-        help_text="Montant configuré au moment du paiement de cette session"
+        verbose_name="Montant dû pour cette exercice (FCFA)",
+        help_text="Montant configuré au moment du paiement de cet exercice"
     )
     date_paiement = models.DateTimeField(auto_now_add=True, verbose_name="Date de paiement")
     notes = models.TextField(blank=True, verbose_name="Notes")
@@ -974,7 +974,7 @@ class PaiementSolidarite(models.Model):
             if is_new and not self.montant_solidarite_du:
                 from core.models import ConfigurationMutuelle, SolidariteExerciceReport
                 config = ConfigurationMutuelle.get_configuration()
-                montant_de_base = config.montant_solidarite
+                montant_de_base = self.montant_solidarite_du
 
                 # Vérifier s'il y a un report (dette ou surplus) depuis l'exercice précédent
                 report = SolidariteExerciceReport.objects.filter(
