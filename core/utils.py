@@ -138,7 +138,7 @@ def calculer_donnees_membre_completes(membre):
             'exercice': exercice_courant.nom,
             'montant_solidarite_base': montant_solidarite_base,
             'montant_reporte': montant_reporte,  # + = dette, - = surplus
-            'total_solidarite_due': total_solidarite_due,
+            'total_solidarite_due': montant_solidarite_base,
             'total_solidarite_payee': total_solidarite_payee,
             'dette_solidarite_cumul': max(total_solidarite_due - total_solidarite_payee, Decimal('0')),
             'solidarite_a_jour': total_solidarite_payee >= total_solidarite_due
