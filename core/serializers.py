@@ -84,8 +84,10 @@ class SessionSerializer(serializers.ModelSerializer):
         from transactions.models import PaiementSolidarite
         from django.db.models import Sum
         from decimal import Decimal
-        total = PaiementSolidarite.objects.filter(session=obj).aggregate(
-            total=Sum('montant'))['total'] or Decimal('0')
+        # Solidarité maintenant cumulée sur l'exercice, pas seulement sur la session
+        total = PaiementSolidarite.objects.filter(
+            session__exercice=obj.exercice
+        ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
         return total
     
     def get_renflouements_generes(self, obj):
