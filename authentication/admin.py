@@ -48,7 +48,8 @@ class UtilisateurAdmin(UserAdmin):
     )
     
     # Actions personnalisées
-    actions = ['marquer_actif', 'marquer_inactif', 'promouvoir_admin', 'retrograder_membre']
+    actions = ['marquer_actif', 'marquer_inactif', 'promouvoir_secretaire', 
+           'promouvoir_tresorier', 'promouvoir_president', 'retrograder_membre']
     
     def nom_complet_formate(self, obj):
         """Affiche le nom complet avec formatage"""
@@ -58,9 +59,12 @@ class UtilisateurAdmin(UserAdmin):
     def role_formate(self, obj):
         """Affiche le rôle avec couleur"""
         colors = {
-            'ADMINISTRATEUR': 'red',
-            'MEMBRE': 'blue'
+        'SECRETAIRE_GENERALE': '#c0392b',
+        'TRESORIER': '#2980b9',
+        'PRESIDENT': '#8e44ad',
+        'MEMBRE': '#27ae60',
         }
+
         color = colors.get(obj.role, 'black')
         return format_html(
             '<span style="color: {}; font-weight: bold;">{}</span>',
@@ -79,13 +83,20 @@ class UtilisateurAdmin(UserAdmin):
         updated = queryset.update(is_active=False)
         self.message_user(request, f'{updated} utilisateur(s) marqué(s) comme inactif(s).')
     marquer_inactif.short_description = "Marquer comme inactif"
-    
-    def promouvoir_admin(self, request, queryset):
-        """Action pour promouvoir des membres en administrateurs"""
-        updated = queryset.filter(role='MEMBRE').update(role='ADMINISTRATEUR', is_staff=True)
-        self.message_user(request, f'{updated} membre(s) promu(s) administrateur(s).')
-    promouvoir_admin.short_description = "Promouvoir en administrateur"
-    
+    #modification des rôles
+    def promouvoir_secretaire(self, request, queryset):
+        updated = queryset.filter(role='MEMBRE').update(role='SECRETAIRE_GENERALE', is_staff=True)
+        self.message_user(request, f'{updated} membre(s) promu(s) Secrétaire Générale.')
+        promouvoir_secretaire.short_description = "Promouvoir en Secrétaire Générale"
+    def promouvoir_tresorier(self, request, queryset):
+        updated = queryset.filter(role='MEMBRE').update(role='TRESORIER')
+        self.message_user(request, f'{updated} membre(s) promu(s) Trésorier.')
+        promouvoir_tresorier.short_description = "Promouvoir en Trésorier"
+
+    def promouvoir_president(self, request, queryset):
+        updated = queryset.filter(role='MEMBRE').update(role='PRESIDENT')
+        self.message_user(request, f'{updated} membre(s) promu(s) Président.')
+        promouvoir_president.short_description = "Promouvoir en Président"
     def retrograder_membre(self, request, queryset):
         """Action pour rétrograder des administrateurs en membres"""
         # Ne pas rétrograder les superusers

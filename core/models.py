@@ -192,52 +192,6 @@ class EmpruntCoefficientTier(models.Model):
 
 
 
-class SolidariteExerciceReport(models.Model):
-    """
-    Report de solidarité entre exercices.
-    Créé automatiquement à la clôture d'un exercice (quand un nouvel exercice EN_COURS est créé).
-
-    - montant_reporte > 0  → dette (le membre n'a pas tout payé sur l'exercice précédent)
-    - montant_reporte < 0  → surplus (le membre a trop payé, il bénéficie d'un crédit)
-    """
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    membre = models.ForeignKey(
-        'Membre', on_delete=models.CASCADE,
-        related_name='reports_solidarite',
-        verbose_name="Membre"
-    )
-    exercice_source = models.ForeignKey(
-        'Exercice', on_delete=models.CASCADE,
-        related_name='reports_solidarite_emis',
-        verbose_name="Exercice source (clôturé)"
-    )
-    exercice_cible = models.ForeignKey(
-        'Exercice', on_delete=models.CASCADE,
-        related_name='reports_solidarite_recus',
-        verbose_name="Exercice cible (nouveau)"
-    )
-    montant_reporte = models.DecimalField(
-        max_digits=12, decimal_places=2,
-        verbose_name="Montant reporté (FCFA)",
-        help_text="Positif = dette à payer sur le prochain exercice. Négatif = surplus (crédit)."
-    )
-    date_creation = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        verbose_name = "Report de solidarité"
-        verbose_name_plural = "Reports de solidarité"
-        ordering = ['-date_creation']
-        unique_together = [['membre', 'exercice_source']]
-
-    def __str__(self):
-        nature = "Dette" if self.montant_reporte > 0 else "Surplus"
-        return (
-            f"{nature} solidarité {self.membre.numero_membre} : "
-            f"{abs(self.montant_reporte):,.0f} FCFA "
-            f"({self.exercice_source.nom} → {self.exercice_cible.nom})"
-        )
-
-
 class Exercice(models.Model):
     """
     Exercice de la mutuelle (généralement 1 an)
@@ -331,17 +285,6 @@ class Exercice(models.Model):
                         print(f"❌ ERREUR lors de la création des renflouements: {e}")
                         # On continue même si ça échoue (pour ne pas bloquer la création du nouvel exercice)
                     
-                    # ✅ APPELER LE REPORT DES SOLIDARITÉS (dette/surplus vers le nouvel exercice)
-                    try:
-                        result_reports = previous_current_exercice.creer_reports_solidarite(exercice_cible=self)
-                        print(f"✅ Reports de solidarité créés: {result_reports['reports_crees']} rapport(s)")
-                        print(f"   - Dettes reportées: {result_reports['dettes_reportees']:,.0f} FCFA")
-                        print(f"   - Surplus reportés: {result_reports['surplus_reportes']:,.0f} FCFA")
-                    except Exception as e:
-                        print(f"❌ ERREUR lors de la création des reports de solidarité: {e}")
-                        # On continue même si ça échoue
-
-                    
                     # 2️⃣ Marquer l'exercice EN_COURS précédent comme TERMINE
                     previous_current_exercice.statut = 'TERMINE'
                     previous_current_exercice.save(update_fields=['statut', 'date_modification'])
@@ -410,37 +353,12 @@ class Exercice(models.Model):
                     else:
                         print(f"⚠️ FondsSocial existant pour {self.nom}")
 
-                    # 6️⃣ Transférer la caisse inscription de l'exercice précédent
-                    montant_caisse_conserver = Decimal('0')
-                    if previous_current_exercice:
-                        try:
-                            ancienne_caisse = CaisseInscription.objects.get(exercice=previous_current_exercice)
-                            montant_caisse_conserver = ancienne_caisse.montant_total
-                        except CaisseInscription.DoesNotExist:
-                            montant_caisse_conserver = Decimal('0')
-                            print(f"⚠️ Aucune caisse inscription trouvée pour {previous_current_exercice.nom}")
-
-                    nouvelle_caisse, caisse_created = CaisseInscription.objects.get_or_create(
+                    # 6️⃣ Créer la caisse inscription pour le nouvel exercice (départ à 0)
+                    CaisseInscription.objects.get_or_create(
                         exercice=self,
-                        defaults={'montant_total': montant_caisse_conserver}
+                        defaults={'montant_total': Decimal('0')}
                     )
-
-                    if caisse_created:
-                        print(f"✅ Nouvelle caisse inscription créée pour {self.nom}")
-                        print(f"   Montant conservé: {montant_caisse_conserver:,.0f} FCFA")
-                        if montant_caisse_conserver > 0:
-                            MouvementCaisseInscription.objects.create(
-                                caisse_inscription=nouvelle_caisse,
-                                type_mouvement='ENTREE',
-                                montant=montant_caisse_conserver,
-                                description=(
-                                    f"Transfert caisse inscription de {previous_current_exercice.nom} "
-                                    f"à {self.nom}"
-                                )
-                            )
-                            print(f"📝 Mouvement caisse inscription enregistré : Transfert de {montant_caisse_conserver:,.0f} FCFA")
-                    else:
-                        print(f"⚠️ Caisse inscription existante pour {self.nom}, montant actuel {nouvelle_caisse.montant_total:,.0f} FCFA")
+                    print(f"✅ Caisse inscription créée ou déjà existante pour {self.nom}")
                         
                 except Exception as e:
                     print(f"❌ ERREUR lors de la gestion FondsSocial / CaisseInscription: {e}")
@@ -626,106 +544,6 @@ class Exercice(models.Model):
         
         return result
 
-    def creer_reports_solidarite(self, exercice_cible):
-        """
-        Calcule et reporte la dette ou le surplus de solidarité de chaque membre
-        vers l'exercice suivant (exercice_cible).
-
-        Logique:
-        - Pour chaque membre actif de cet exercice (exercice source):
-            - Récupérer le montant dû (config.montant_solidarite)
-            - Récupérer le total réellement payé
-            - Calculer la différence: payé - dû
-                * Si diff < 0 → dette (le membre doit encore de l'argent)
-                * Si diff > 0 → surplus (crédit pour le prochain exercice)
-                * Si diff == 0 → tout est réglé, pas de report nécessaire
-        - Créer un SolidariteExerciceReport par membre avec une balance non nulle
-
-        Returns:
-            dict: {'reports_crees': int, 'dettes_reportees': Decimal, 'surplus_reportes': Decimal}
-        """
-        from decimal import Decimal
-        from django.db.models import Sum
-        from transactions.models import PaiementSolidarite
-        from core.models import ConfigurationMutuelle, SolidariteExerciceReport
-
-        result = {
-            'reports_crees': 0,
-            'dettes_reportees': Decimal('0'),
-            'surplus_reportes': Decimal('0'),
-        }
-
-        print(f"\n📊 CALCUL DES REPORTS DE SOLIDARITÉ: {self.nom} → {exercice_cible.nom}")
-        print(f"{'='*70}")
-
-        config = ConfigurationMutuelle.get_configuration()
-        montant_du_exercice = config.montant_solidarite
-
-        membres = Membre.objects.filter(actif=True)
-
-        for membre in membres:
-            # Récupérer l'éventuel report que ce membre avait au DEBUT de cet exercice (exercice source)
-            # c'est-à-dire le report créé à la fin de l'exercice (N-1) vers cet exercice (N)
-            report_precedent = SolidariteExerciceReport.objects.filter(
-                membre=membre,
-                exercice_cible=self
-            ).first()
-            
-            # Montant reporté (+ = dette, - = surplus)
-            montant_report_precedent = report_precedent.montant_reporte if report_precedent else Decimal('0')
-            
-            # Vrai montant total dû pour cet exercice = config de base + report précédent
-            # On utilise max(..., 0) car un gros surplus pourrait rendre le montant dû négatif
-            total_due_exercice = max(montant_du_exercice + montant_report_precedent, Decimal('0'))
-
-            # Total payé par ce membre sur CET exercice (exercice source / clôturé)
-            total_paye = PaiementSolidarite.objects.filter(
-                membre=membre,
-                session__exercice=self
-            ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
-
-            # Différence: dû - payé
-            # positif = dette (a payé moins que prévu), négatif = surplus (a payé plus)
-            diff = total_due_exercice - total_paye
-
-            if diff == Decimal('0'):
-                # Tout est réglé exactement, pas de report
-                continue
-
-            # Vérifier si un report existe déjà pour ce membre/exercice_source
-            existing = SolidariteExerciceReport.objects.filter(
-                membre=membre,
-                exercice_source=self
-            ).exists()
-
-            if existing:
-                print(f"   ⚠️ Report déjà existant pour {membre.numero_membre}, ignoré")
-                continue
-
-            # Créer le report (diff > 0 = dette, diff < 0 = surplus)
-            nature = "DETTE" if diff > 0 else "SURPLUS"
-            SolidariteExerciceReport.objects.create(
-                membre=membre,
-                exercice_source=self,
-                exercice_cible=exercice_cible,
-                montant_reporte=diff,  # positif = dette, négatif = surplus
-            )
-            result['reports_crees'] += 1
-
-            if diff < 0:
-                result['surplus_reportes'] += abs(diff)
-                print(f"   ✅ Surplus {membre.numero_membre}: {abs(diff):,.0f} FCFA (crédit)")
-            else:
-                result['dettes_reportees'] += diff
-                print(f"   ⚠️  Dette {membre.numero_membre}: +{diff:,.0f} FCFA")
-
-        print(f"\n✅ {result['reports_crees']} report(s) créé(s)")
-        print(f"   Dettes totales: {result['dettes_reportees']:,.0f} FCFA")
-        print(f"   Surplus totaux: {result['surplus_reportes']:,.0f} FCFA")
-        print(f"{'='*70}\n")
-
-        return result
-
     def clean(self):
         """
         Validation personnalisée
@@ -880,16 +698,14 @@ class Session(models.Model):
         if self.statut == 'EN_COURS' and not was_en_cours and not is_first_session:
             montant_total_retrait = (self.montant_collation or 0) + (self.montant_autre_depense or 0)
             if montant_total_retrait > 0:
-                # Les dépenses de collations et autres sont payées depuis la caisse d'inscription
-                from core.models import CaisseInscription
-                caisse = CaisseInscription.get_caisse_actuelle()
-                if not caisse or caisse.montant_total < montant_total_retrait:
-                    dispo = caisse.montant_total if caisse else 0
+                fonds = FondsSocial.get_fonds_actuel()
+                if not fonds or fonds.montant_total < montant_total_retrait:
+                    dispo = fonds.montant_total if fonds else 0
                     raise ValidationError(
-                        f"❌ Caisse d'inscription insuffisante. "
+                        f"❌ Fonds social insuffisant. "
                         f"Requis: {montant_total_retrait:,.0f} FCFA, Dispo: {dispo:,.0f} FCFA"
                     )
-                print(f"✅ Vérification caisse d'inscription OK : {caisse.montant_total:,.0f} FCFA")
+                print(f"✅ Vérification fonds social OK : {fonds.montant_total:,.0f} FCFA")
 
         # 5. EXECUTION ATOMIQUE
         with transaction.atomic():
@@ -1015,18 +831,18 @@ class Session(models.Model):
             bool: True si succès, False si échec
         """
         try:
-            from core.models import CaisseInscription
+            from core.models import FondsSocial
             
-            caisse = CaisseInscription.get_caisse_actuelle()
-            if not caisse:
-                print("❌ ERREUR : Aucune caisse d'inscription actuelle trouvée")
+            fonds = FondsSocial.get_fonds_actuel()
+            if not fonds:
+                print("❌ ERREUR : Aucun fonds social actuel trouvé")
                 return False
             
-            print(f"💰 Caisse inscription avant retrait : {caisse.montant_total:,.0f} FCFA")
+            print(f"💰 Fonds social avant retrait : {fonds.montant_total:,.0f} FCFA")
             
             # 1) Retrait collation
             if self.montant_collation > 0:
-                if not caisse.retirer_montant(
+                if not fonds.retirer_montant(
                     self.montant_collation,
                     f"Collation Session {self.nom} - {self.date_session}"
                 ):
@@ -1046,7 +862,7 @@ class Session(models.Model):
 
             # 2) Retrait autre dépense éventuelle
             if self.montant_autre_depense > 0:
-                if not caisse.retirer_montant(
+                if not fonds.retirer_montant(
                     self.montant_autre_depense,
                     f"Autre dépense Session {self.nom} - {self.date_session} ({self.motif_autre_depense})"
                 ):
@@ -1067,7 +883,7 @@ class Session(models.Model):
                 except Exception as e:
                     print(f"⚠️  Erreur lors de l'enregistrement de l'autre dépense: {e}")
             
-            print(f"💰 Caisse inscription après retrait : {caisse.montant_total:,.0f} FCFA")
+            print(f"💰 Fonds social après retrait : {fonds.montant_total:,.0f} FCFA")
             print(
                 f"✅ Retraits session: "
                 f"collation={self.montant_collation:,.0f} FCFA, "
@@ -1489,31 +1305,6 @@ class CaisseInscription(models.Model):
             description=description
         )
         print(f"Caisse inscription (via F()): +{montant:,.0f} FCFA - {description}")
-
-    def retirer_montant(self, montant, description=""):
-        """Retire un montant de la caisse inscription."""
-        if montant <= 0:
-            return True
-
-        if self.montant_total >= montant:
-            CaisseInscription.objects.filter(pk=self.pk).update(
-                montant_total=F('montant_total') - montant,
-                date_modification=timezone.now()
-            )
-            self.refresh_from_db()
-            MouvementCaisseInscription.objects.create(
-                caisse_inscription=self,
-                type_mouvement='SORTIE',
-                montant=montant,
-                description=description
-            )
-            print(f"Caisse inscription: -{montant:,.0f} FCFA - {description}")
-            return True
-        else:
-            print(
-                f"ERREUR: Caisse inscription insuffisante. Disponible: {self.montant_total:,.0f}, Demandé: {montant:,.0f}"
-            )
-            return False
 
 
 class MouvementCaisseInscription(models.Model):

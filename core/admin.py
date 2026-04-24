@@ -4,8 +4,7 @@ from django.db.models import Sum
 from .models import (
     ConfigurationMutuelle, Exercice, Session, TypeAssistance,
     Membre, FondsSocial, MouvementFondsSocial,
-    CaisseInscription, MouvementCaisseInscription,
-    SolidariteExerciceReport
+    CaisseInscription, MouvementCaisseInscription
 )
 
 @admin.register(ConfigurationMutuelle)
@@ -258,56 +257,6 @@ class MouvementFondsSocialAdmin(admin.ModelAdmin):
     def description_courte(self, obj):
         return obj.description[:50] + "..." if len(obj.description) > 50 else obj.description
     description_courte.short_description = 'Description'
-
-
-@admin.register(SolidariteExerciceReport)
-class SolidariteExerciceReportAdmin(admin.ModelAdmin):
-    """
-    Admin pour visualiser les reports de solidarité entre exercices.
-    """
-    list_display = (
-        'membre_numero', 'exercice_source_nom', 'exercice_cible_nom',
-        'montant_reporte_formate', 'nature_report', 'date_creation'
-    )
-    list_filter = ('exercice_source', 'exercice_cible')
-    search_fields = ('membre__numero_membre', 'membre__utilisateur__first_name', 'membre__utilisateur__last_name')
-    readonly_fields = ('date_creation',)
-    ordering = ('-date_creation',)
-
-    def membre_numero(self, obj):
-        return obj.membre.numero_membre
-    membre_numero.short_description = 'Membre'
-
-    def exercice_source_nom(self, obj):
-        return obj.exercice_source.nom
-    exercice_source_nom.short_description = 'Exercice clôturé'
-
-    def exercice_cible_nom(self, obj):
-        return obj.exercice_cible.nom
-    exercice_cible_nom.short_description = 'Exercice suivant'
-
-    def montant_reporte_formate(self, obj):
-        montant = obj.montant_reporte
-        if montant > 0:
-            return format_html(
-                '<span style="color: orange; font-weight: bold;">+{:,.0f} FCFA</span>',
-                montant
-            )
-        elif montant < 0:
-            return format_html(
-                '<span style="color: green; font-weight: bold;">{:,.0f} FCFA (crédit)</span>',
-                montant
-            )
-        return "0 FCFA"
-    montant_reporte_formate.short_description = 'Montant reporté'
-
-    def nature_report(self, obj):
-        if obj.montant_reporte > 0:
-            return format_html('<span style="color: orange;">📌 Dette</span>')
-        elif obj.montant_reporte < 0:
-            return format_html('<span style="color: green;">✅ Surplus (crédit)</span>')
-        return "✅ Soldé"
-    nature_report.short_description = 'Nature'
 
 
 @admin.register(CaisseInscription)
