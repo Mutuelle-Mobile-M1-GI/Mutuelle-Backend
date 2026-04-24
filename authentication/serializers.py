@@ -55,21 +55,27 @@ class UtilisateurSerializer(serializers.ModelSerializer):
     """
     nom_complet = serializers.ReadOnlyField()
     is_membre = serializers.ReadOnlyField()
-    is_administrateur = serializers.ReadOnlyField()
+    is_administrateur = serializers.ReadOnlyField()       # compatibilité
+    is_secretaire_generale = serializers.ReadOnlyField()
+    is_tresorier = serializers.ReadOnlyField()
+    is_president = serializers.ReadOnlyField()
+    is_bureau = serializers.ReadOnlyField()
+    can_write = serializers.ReadOnlyField()
     photo_profil_url = serializers.SerializerMethodField()
-    
+
     class Meta:
         model = Utilisateur
         fields = [
             'id', 'username', 'email', 'first_name', 'last_name', 'telephone',
-            'role', 'photo_profil', 'photo_profil_url', 'nom_complet', 
-            'is_membre', 'is_administrateur', 'date_creation', 'date_modification',
-            'is_active'
+            'role', 'photo_profil', 'photo_profil_url', 'nom_complet',
+            'is_membre', 'is_administrateur', 'is_secretaire_generale',
+            'is_tresorier', 'is_president', 'is_bureau', 'can_write',
+            'date_creation', 'date_modification', 'is_active'
         ]
         extra_kwargs = {
             'password': {'write_only': True},
         }
-    
+
     def get_photo_profil_url(self, obj):
         if obj.photo_profil:
             request = self.context.get('request')
@@ -77,6 +83,7 @@ class UtilisateurSerializer(serializers.ModelSerializer):
                 return request.build_absolute_uri(obj.photo_profil.url)
             return obj.photo_profil.url
         return None
+
 
 class UtilisateurCreateSerializer(serializers.ModelSerializer):
     """

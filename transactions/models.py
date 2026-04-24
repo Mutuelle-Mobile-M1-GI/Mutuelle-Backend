@@ -241,6 +241,54 @@ class Emprunt(models.Model):
         print(f"   🔄 Emprunt en cours normal -> {nouveau_statut}")
         return nouveau_statut
     
+    #redistribution des 15k de penalite
+
+    def _redistribuer_penalite(self, montant_a_redistribuer, tag_palier):
+    
+        if montant_a_redistribuer <= 0:
+            return
+
+        total_global = Decimal('0')
+        epargnes_membres = []
+
+        tous_membres = Membre.objects.filter(actif=True)
+        for m in tous_membres:
+            e = m.calculer_epargne_pure()
+            if e > 0:
+                total_global += e
+                epargnes_membres.append({'membre': m, 'montant': e})
+
+        if total_global <= 0:
+            print("⚠️ Aucune épargne globale trouvée, redistribution annulée.")
+            return
+
+        with transaction.atomic():
+            for item in epargnes_membres:
+                part = (item['montant'] / total_global) * montant_a_redistribuer
+                part = part.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+                if part > 0:
+                    Interet.objects.create(
+                        membre=item['membre'],
+                        emprunt_source=self,
+                        exercice=self.session_emprunt.exercice,
+                        session=self.session_emprunt,
+                        montant=part
+                    )
+                    EpargneTransaction.objects.create(
+                        membre=item['membre'],
+                        type_transaction='AJOUT_INTERET',
+                        montant=part,
+                        session=self.session_emprunt,
+                        notes=(
+                            f"Pénalité retard {tag_palier} sur prêt de "
+                            f"{self.membre.numero_membre}: {part:,.0f} FCFA"
+                        )
+                    )
+
+        print(f"✅ Redistribution de {montant_a_redistribuer:,.0f} FCFA ({tag_palier}) terminée.")
+    
+    #recalcul des pourcentages apres chaque 3 sessions
     def capitaliser_interets_retard(self):
         from core.models import ConfigurationMutuelle, Session
         from decimal import Decimal
@@ -273,16 +321,27 @@ class Emprunt(models.Model):
             reste = self.montant_total_a_rembourser - self.montant_rembourse
             
             if reste > 0:
-                penalite = reste * taux
-                self.montant_total_a_rembourser += penalite
+                
+                PENALITE_FIXE = Decimal('15000')
+                penalite_taux = reste * taux
+                penalite_totale = penalite_taux + PENALITE_FIXE
+
+                self.montant_total_a_rembourser += penalite_totale
                 self.statut = 'EN_RETARD'
-                
+
                 date_str = datetime.datetime.now().strftime("%d/%m/%Y")
-                note_entree = f"\n[{date_str}] Intérêt retard ({tag_palier}): +{penalite} FCFA"
+                note_entree = (
+                    f"\n[{date_str}] Pénalité retard ({tag_palier}): "
+                    f"+{penalite_taux:,.0f} FCFA (intérêt taux) "
+                    f"+ {PENALITE_FIXE:,.0f} FCFA (pénalité fixe) "
+                    f"= +{penalite_totale:,.0f} FCFA total"
+                )
                 self.notes = (self.notes or "") + note_entree
-                
+
                 self.save()
-                print(f"💰 SUCCÈS : +{penalite} FCFA ajoutés (Cycle {sessions_passees}/3)")
+                self._redistribuer_penalite(penalite_totale, tag_palier)
+
+                print(f"💰 SUCCÈS : +{penalite_totale:,.0f} FCFA ajoutés (Cycle {sessions_passees}/3)")
                 return True
         return False
     
