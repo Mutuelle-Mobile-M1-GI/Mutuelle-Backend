@@ -189,7 +189,100 @@ class EmpruntCoefficientTier(models.Model):
         if self.min_amount >= self.max_amount:
             raise ValidationError("min_amount doit être strictement inférieur à max_amount")
 
+    def __str__(self):
+        return f"Gain {self.montant:,.0f} FCFA - {self.membre.utilisateur.nom_complet} (Session {self.session.nom})"
 
+class EmpruntCoefficientTier(models.Model):
+    exercise = models.ForeignKey(
+        'Exercice',
+        on_delete=models.CASCADE,
+        related_name='emprunt_tiers',
+        verbose_name="Exercice"
+    )
+    min_amount = models.PositiveBigIntegerField(
+        verbose_name="Montant minimum (FCFA)",
+        validators=[MinValueValidator(0)]
+    )
+    max_amount = models.PositiveBigIntegerField(
+        verbose_name="Montant maximum (FCFA)",
+    )
+    coefficient = models.DecimalField(
+        verbose_name="Coefficient",
+        max_digits=5,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.01'))]
+    )
+    max_cap = models.PositiveBigIntegerField(
+        verbose_name="Plafond absolu (optionnel)",
+        null=True,
+        blank=True,
+        help_text="Ex: 2 000 000 FCFA – seulement pour la première tranche"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Tranche coefficient emprunt"
+        verbose_name_plural = "Tranches coefficients emprunt"
+        unique_together = ('exercise', 'min_amount')
+        ordering = ['min_amount']
+
+    def __str__(self):
+        cap = f" (max {self.max_cap:,} FCFA)" if self.max_cap else ""
+        return f"{self.min_amount:,} – {self.max_amount:,} × {self.coefficient}{cap}"
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        if self.min_amount >= self.max_amount:
+            raise ValidationError("min_amount doit être strictement inférieur à max_amount")
+
+
+
+
+class SolidariteExerciceReport(models.Model):
+    """
+    Report de solidarité entre exercices.
+    Créé automatiquement à la clôture d'un exercice (quand un nouvel exercice EN_COURS est créé).
+
+    - montant_reporte > 0  → dette (le membre n'a pas tout payé sur l'exercice précédent)
+    - montant_reporte < 0  → surplus (le membre a trop payé, il bénéficie d'un crédit)
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    membre = models.ForeignKey(
+        'Membre', on_delete=models.CASCADE,
+        related_name='reports_solidarite',
+        verbose_name="Membre"
+    )
+    exercice_source = models.ForeignKey(
+        'Exercice', on_delete=models.CASCADE,
+        related_name='reports_solidarite_emis',
+        verbose_name="Exercice source (clôturé)"
+    )
+    exercice_cible = models.ForeignKey(
+        'Exercice', on_delete=models.CASCADE,
+        related_name='reports_solidarite_recus',
+        verbose_name="Exercice cible (nouveau)"
+    )
+    montant_reporte = models.DecimalField(
+        max_digits=12, decimal_places=2,
+        verbose_name="Montant reporté (FCFA)",
+        help_text="Positif = dette à payer sur le prochain exercice. Négatif = surplus (crédit)."
+    )
+    date_creation = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Report de solidarité"
+        verbose_name_plural = "Reports de solidarité"
+        ordering = ['-date_creation']
+        unique_together = [['membre', 'exercice_source']]
+
+    def __str__(self):
+        nature = "Dette" if self.montant_reporte > 0 else "Surplus"
+        return (
+            f"{nature} solidarité {self.membre.numero_membre} : "
+            f"{abs(self.montant_reporte):,.0f} FCFA "
+            f"({self.exercice_source.nom} → {self.exercice_cible.nom})"
+        )
 
 
 class Exercice(models.Model):
@@ -359,6 +452,37 @@ class Exercice(models.Model):
                         defaults={'montant_total': Decimal('0')}
                     )
                     print(f"✅ Caisse inscription créée ou déjà existante pour {self.nom}")
+                    # 6️⃣ Transférer la caisse inscription de l'exercice précédent
+                    montant_caisse_conserver = Decimal('0')
+                    if previous_current_exercice:
+                        try:
+                            ancienne_caisse = CaisseInscription.objects.get(exercice=previous_current_exercice)
+                            montant_caisse_conserver = ancienne_caisse.montant_total
+                        except CaisseInscription.DoesNotExist:
+                            montant_caisse_conserver = Decimal('0')
+                            print(f"⚠️ Aucune caisse inscription trouvée pour {previous_current_exercice.nom}")
+
+                    nouvelle_caisse, caisse_created = CaisseInscription.objects.get_or_create(
+                        exercice=self,
+                        defaults={'montant_total': montant_caisse_conserver}
+                    )
+
+                    if caisse_created:
+                        print(f"✅ Nouvelle caisse inscription créée pour {self.nom}")
+                        print(f"   Montant conservé: {montant_caisse_conserver:,.0f} FCFA")
+                        if montant_caisse_conserver > 0:
+                            MouvementCaisseInscription.objects.create(
+                                caisse_inscription=nouvelle_caisse,
+                                type_mouvement='ENTREE',
+                                montant=montant_caisse_conserver,
+                                description=(
+                                    f"Transfert caisse inscription de {previous_current_exercice.nom} "
+                                    f"à {self.nom}"
+                                )
+                            )
+                            print(f"📝 Mouvement caisse inscription enregistré : Transfert de {montant_caisse_conserver:,.0f} FCFA")
+                    else:
+                        print(f"⚠️ Caisse inscription existante pour {self.nom}, montant actuel {nouvelle_caisse.montant_total:,.0f} FCFA")
                         
                 except Exception as e:
                     print(f"❌ ERREUR lors de la gestion FondsSocial / CaisseInscription: {e}")
@@ -706,6 +830,16 @@ class Session(models.Model):
                         f"Requis: {montant_total_retrait:,.0f} FCFA, Dispo: {dispo:,.0f} FCFA"
                     )
                 print(f"✅ Vérification fonds social OK : {fonds.montant_total:,.0f} FCFA")
+                # Les dépenses de collations et autres sont payées depuis la caisse d'inscription
+                from core.models import CaisseInscription
+                caisse = CaisseInscription.get_caisse_actuelle()
+                if not caisse or caisse.montant_total < montant_total_retrait:
+                    dispo = caisse.montant_total if caisse else 0
+                    raise ValidationError(
+                        f"❌ Caisse d'inscription insuffisante. "
+                        f"Requis: {montant_total_retrait:,.0f} FCFA, Dispo: {dispo:,.0f} FCFA"
+                    )
+                print(f"✅ Vérification caisse d'inscription OK : {caisse.montant_total:,.0f} FCFA")
 
         # 5. EXECUTION ATOMIQUE
         with transaction.atomic():
@@ -831,18 +965,18 @@ class Session(models.Model):
             bool: True si succès, False si échec
         """
         try:
-            from core.models import FondsSocial
+            from core.models import CaisseInscription
             
-            fonds = FondsSocial.get_fonds_actuel()
-            if not fonds:
-                print("❌ ERREUR : Aucun fonds social actuel trouvé")
+            caisse = CaisseInscription.get_caisse_actuelle()
+            if not caisse:
+                print("❌ ERREUR : Aucune caisse d'inscription actuelle trouvée")
                 return False
             
-            print(f"💰 Fonds social avant retrait : {fonds.montant_total:,.0f} FCFA")
+            print(f"💰 Caisse inscription avant retrait : {caisse.montant_total:,.0f} FCFA")
             
             # 1) Retrait collation
             if self.montant_collation > 0:
-                if not fonds.retirer_montant(
+                if not caisse.retirer_montant(
                     self.montant_collation,
                     f"Collation Session {self.nom} - {self.date_session}"
                 ):
@@ -883,7 +1017,7 @@ class Session(models.Model):
                 except Exception as e:
                     print(f"⚠️  Erreur lors de l'enregistrement de l'autre dépense: {e}")
             
-            print(f"💰 Fonds social après retrait : {fonds.montant_total:,.0f} FCFA")
+            print(f"💰 Caisse inscription après retrait : {caisse.montant_total:,.0f} FCFA")
             print(
                 f"✅ Retraits session: "
                 f"collation={self.montant_collation:,.0f} FCFA, "
@@ -1305,6 +1439,31 @@ class CaisseInscription(models.Model):
             description=description
         )
         print(f"Caisse inscription (via F()): +{montant:,.0f} FCFA - {description}")
+
+    def retirer_montant(self, montant, description=""):
+        """Retire un montant de la caisse inscription."""
+        if montant <= 0:
+            return True
+
+        if self.montant_total >= montant:
+            CaisseInscription.objects.filter(pk=self.pk).update(
+                montant_total=F('montant_total') - montant,
+                date_modification=timezone.now()
+            )
+            self.refresh_from_db()
+            MouvementCaisseInscription.objects.create(
+                caisse_inscription=self,
+                type_mouvement='SORTIE',
+                montant=montant,
+                description=description
+            )
+            print(f"Caisse inscription: -{montant:,.0f} FCFA - {description}")
+            return True
+        else:
+            print(
+                f"ERREUR: Caisse inscription insuffisante. Disponible: {self.montant_total:,.0f}, Demandé: {montant:,.0f}"
+            )
+            return False
 
 
 class MouvementCaisseInscription(models.Model):

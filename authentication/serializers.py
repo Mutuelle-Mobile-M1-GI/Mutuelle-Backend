@@ -63,6 +63,9 @@ class UtilisateurSerializer(serializers.ModelSerializer):
     can_write = serializers.ReadOnlyField()
     photo_profil_url = serializers.SerializerMethodField()
 
+    is_administrateur = serializers.ReadOnlyField()
+    photo_profil_url = serializers.SerializerMethodField()
+    
     class Meta:
         model = Utilisateur
         fields = [
@@ -71,6 +74,9 @@ class UtilisateurSerializer(serializers.ModelSerializer):
             'is_membre', 'is_administrateur', 'is_secretaire_generale',
             'is_tresorier', 'is_president', 'is_bureau', 'can_write',
             'date_creation', 'date_modification', 'is_active'
+            'role', 'photo_profil', 'photo_profil_url', 'nom_complet', 
+            'is_membre', 'is_administrateur', 'date_creation', 'date_modification',
+            'is_active'
         ]
         extra_kwargs = {
             'password': {'write_only': True},

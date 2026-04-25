@@ -4,7 +4,8 @@ from django.db.models import Sum
 from .models import (
     ConfigurationMutuelle, Exercice, Session, TypeAssistance,
     Membre, FondsSocial, MouvementFondsSocial,
-    CaisseInscription, MouvementCaisseInscription
+    CaisseInscription, MouvementCaisseInscription,
+    SolidariteExerciceReport
 )
 
 @admin.register(ConfigurationMutuelle)

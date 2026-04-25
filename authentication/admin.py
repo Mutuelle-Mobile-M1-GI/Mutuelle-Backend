@@ -97,6 +97,13 @@ class UtilisateurAdmin(UserAdmin):
         updated = queryset.filter(role='MEMBRE').update(role='PRESIDENT')
         self.message_user(request, f'{updated} membre(s) promu(s) Président.')
         promouvoir_president.short_description = "Promouvoir en Président"
+    
+    def promouvoir_admin(self, request, queryset):
+        """Action pour promouvoir des membres en administrateurs"""
+        updated = queryset.filter(role='MEMBRE').update(role='ADMINISTRATEUR', is_staff=True)
+        self.message_user(request, f'{updated} membre(s) promu(s) administrateur(s).')
+    promouvoir_admin.short_description = "Promouvoir en administrateur"
+    
     def retrograder_membre(self, request, queryset):
         """Action pour rétrograder des administrateurs en membres"""
         # Ne pas rétrograder les superusers

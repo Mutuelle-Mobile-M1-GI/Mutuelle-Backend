@@ -14,6 +14,9 @@ class Utilisateur(AbstractUser):
         ('PRESIDENT', 'Président'),
     ]
 
+        ('ADMINISTRATEUR', 'Administrateur'),
+    ]
+    
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     email = models.EmailField(unique=True, verbose_name="Email")
     telephone = models.CharField(
@@ -73,3 +76,18 @@ class Utilisateur(AbstractUser):
     def can_write(self):
         """Seul la Secrétaire Générale peut modifier les données"""
         return self.role == 'SECRETAIRE_GENERALE'
+    
+    def __str__(self):
+        return f"{self.first_name} {self.last_name} ({self.email})"
+    
+    @property
+    def nom_complet(self):
+        return f"{self.first_name} {self.last_name}"
+    
+    @property
+    def is_membre(self):  # Ajout du nom de la fonction ici
+        return self.role == 'MEMBRE'
+    
+    @property
+    def is_administrateur(self):
+        return self.role == 'ADMINISTRATEUR'
