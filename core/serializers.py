@@ -1,6 +1,8 @@
 from rest_framework import serializers
 from decimal import Decimal
 from django.db import models
+import json
+import time
 # 🦊 CRITIQUE: Un `try` sans `catch` ? C'est comme sauter en parachute sans vérifier s'il y en a un.
 
 
@@ -11,6 +13,25 @@ from .models import (
 )
 from authentication.serializers import UtilisateurSerializer
 from .utils import calculer_donnees_membre_completes, calculer_donnees_administrateur
+
+
+def _agent_debug_log(hypothesis_id, location, message, data):
+    # region agent log
+    try:
+        payload = {
+            "sessionId": "5523dd",
+            "runId": "pre-fix",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        with open("/home/darren/Bureau/projet/Mutuelle-Backend/.cursor/debug-5523dd.log", "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    except Exception:
+        pass
+    # endregion
 
 class ConfigurationMutuelleSerializer(serializers.ModelSerializer):
     """
@@ -93,9 +114,61 @@ class SessionSerializer(serializers.ModelSerializer):
     def get_renflouements_generes(self, obj):
         from django.db.models import Sum
         from decimal import Decimal
-        total = obj.renflouements.aggregate(
-            total=Sum('montant_du'))['total'] or Decimal('0')
-        return total
+        from transactions.models import Renflouement
+        from django.db import connection
+        _agent_debug_log(
+            "H1",
+            "core/serializers.py:get_renflouements_generes:entry",
+            "Entry get_renflouements_generes",
+            {
+                "session_id": str(obj.id),
+                "exercice_id": str(obj.exercice_id) if obj.exercice_id else None,
+                "renflouement_fields": [f.name for f in Renflouement._meta.fields],
+                "has_reverse_manager": hasattr(obj, "renflouements"),
+            },
+        )
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("PRAGMA table_info(transactions_renflouement)")
+                cols = [row[1] for row in cursor.fetchall()]
+            _agent_debug_log(
+                "H2",
+                "core/serializers.py:get_renflouements_generes:schema",
+                "DB schema for transactions_renflouement",
+                {"columns": cols},
+            )
+        except Exception as schema_err:
+            _agent_debug_log(
+                "H2",
+                "core/serializers.py:get_renflouements_generes:schema_error",
+                "Failed to inspect DB schema",
+                {"error": str(schema_err)},
+            )
+        _agent_debug_log(
+            "H3",
+            "core/serializers.py:get_renflouements_generes:skip_reverse_aggregate",
+            "Skip reverse relation aggregate (session-based)",
+            {},
+        )
+        try:
+            total_exercice = Renflouement.objects.filter(
+                exercice=obj.exercice
+            ).aggregate(total=Sum("montant_du"))["total"] or Decimal("0")
+            _agent_debug_log(
+                "H4",
+                "core/serializers.py:get_renflouements_generes:exercice_aggregate",
+                "Aggregate via exercice filter",
+                {"total_exercice": str(total_exercice)},
+            )
+            return total_exercice
+        except Exception as ex_err:
+            _agent_debug_log(
+                "H4",
+                "core/serializers.py:get_renflouements_generes:exercice_aggregate_error",
+                "Aggregate via exercice filter failed",
+                {"error_type": ex_err.__class__.__name__, "error": str(ex_err)},
+            )
+            return Decimal("0")
     
 class TypeAssistanceSerializer(serializers.ModelSerializer):
     """

@@ -15,93 +15,6 @@ from django.db import models
 from django.core.validators import MinValueValidator
 from django.utils import timezone
 
-class PaiementInscription(models.Model):
-    """
-    Paiements d'inscription par tranche
-    """
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    membre = models.ForeignKey(Membre, on_delete=models.CASCADE, related_name='paiements_inscription')
-    montant = models.DecimalField(
-        max_digits=12, decimal_places=2,
-        validators=[MinValueValidator(0)],
-        verbose_name="Montant payé (FCFA)"
-    )
-    # ✅ NOUVEAU CHAMP qui va stocker le montant total de l'inscrption que le membre va devoir payer
-    montant_inscription_du = models.DecimalField(
-        max_digits=12, decimal_places=2,
-        validators=[MinValueValidator(0)],
-        verbose_name="Montant total dû pour l'inscription (FCFA)",
-        help_text="Montant configuré au moment de l'inscription du membre"
-    )
-    date_paiement = models.DateTimeField(auto_now_add=True, verbose_name="Date de paiement")
-    session = models.ForeignKey(Session, on_delete=models.CASCADE, related_name='paiements_inscription', verbose_name="Session")
-    notes = models.TextField(blank=True, verbose_name="Notes")
-    
-    class Meta:
-        verbose_name = "Paiement d'inscription"
-        verbose_name_plural = "Paiements d'inscription"
-        ordering = ['-date_paiement']
-        
-    def save(self, *args, **kwargs):
-        # Sauvegarde et alimentation du fonds social en transaction
-        with transaction.atomic():
-            is_new = getattr(self, '_state', None) and getattr(self._state, 'adding', True)
-            if is_new and self.montant and self.montant > 0:
-                try:
-                    fonds = FondsSocial.get_fonds_actuel()
-                    if fonds:
-                        desc = f"Inscription {self.membre.numero_membre} - Session {self.session.nom}"
-                        fonds.ajouter_montant(self.montant, description=desc)
-                    else:
-                        print("Aucun fonds social actuel trouvé pour l'inscription")
-                except Exception as e:
-                    print(f"Erreur alimentation fonds pour inscription: {e}")
-            
-            is_new = self.pk is None
-            # ✅ LOGIC AMÉLIORÉE: Gérer le montant_inscription_du
-            if is_new:
-                # Pour le premier paiement, enregistrer le montant actuel de la config
-                premier_paiement = PaiementInscription.objects.filter(
-                    membre=self.membre
-                ).exists()
-
-                if not premier_paiement:
-                    # C'est le PREMIER paiement d'inscription de ce membre
-                    from core.models import ConfigurationMutuelle
-                    config = ConfigurationMutuelle.get_configuration()
-                    self.montant_inscription_du = config.montant_inscription
-                    print(f"📝 Premier paiement inscription: montant dû = {self.montant_inscription_du}")
-                else:
-                    # C'est un paiement suivant, récupérer le montant du premier paiement
-                    self.montant_inscription_du = premier_paiement.montant_inscription_du
-                    print(f"📝 Paiement suivant: montant dû = {self.montant_inscription_du}")
-
-            super().save(*args, **kwargs)
-
-            # ✅ Mettre à jour le statut inscription_terminee du membre
-            if is_new:
-                print('%%%%%%%%%%%mise a jour de insctiption_termine')
-                self.membre.update_inscription_terminee()
-                print(self.membre.update_inscription_terminee())
-                self.membre.save()
-
-            # Alimenter le fonds social
-#             if is_new:
-#                 from core.models import FondsSocial
-#                 fonds = FondsSocial.get_fonds_actuel()
-#                 if fonds:
-#                     fonds.ajouter_montant(
-#                         self.montant,
-#                         f"Inscription {self.membre.numero_membre} - Session {self.session.nom}"
-#                     )
-    
-    
-    def __str__(self):
-        return f"{self.membre.numero_membre} - {self.montant:,.0f} FCFA ({self.date_paiement.date()})"
-
-
-
-
 
 class Emprunt(models.Model):
     """
@@ -745,7 +658,7 @@ class Renflouement(models.Model):
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     membre = models.ForeignKey(Membre, on_delete=models.CASCADE, related_name='renflouements')
-    session = models.ForeignKey(Session, on_delete=models.CASCADE, related_name='renflouements')
+    session = models.ForeignKey(Session, on_delete=models.CASCADE, related_name='renflouements', null=True, blank=True)
     montant_du = models.DecimalField(
         max_digits=12, decimal_places=2,
         validators=[MinValueValidator(0)],
