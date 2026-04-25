@@ -98,6 +98,102 @@ class PaiementInscription(models.Model):
     
     def __str__(self):
         return f"{self.membre.numero_membre} - {self.montant:,.0f} FCFA ({self.date_paiement.date()})"
+    
+class PaiementSolidarite(models.Model):
+    """
+    Paiements de solidarité (fonds social) par session
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    membre = models.ForeignKey(Membre, on_delete=models.CASCADE, related_name='paiements_solidarite')
+    session = models.ForeignKey(Session, on_delete=models.CASCADE, related_name='paiements_solidarite')
+    montant = models.DecimalField(
+        max_digits=12, decimal_places=2,
+        validators=[MinValueValidator(0)],
+        verbose_name="Montant payé (FCFA)"
+    )
+    # ✅ NOUVEAU CHAMP pour stocker le montant total de la solidarite que le membre va devoir payer
+    montant_solidarite_du = models.DecimalField(
+        max_digits=12, decimal_places=2,
+        validators=[MinValueValidator(0)],
+        verbose_name="Montant dû pour cette session (FCFA)",
+        help_text="Montant configuré au moment du paiement de cette session"
+    )
+    date_paiement = models.DateTimeField(auto_now_add=True, verbose_name="Date de paiement")
+    notes = models.TextField(blank=True, verbose_name="Notes")
+    
+    class Meta:
+        verbose_name = "Paiement de solidarité"
+        verbose_name_plural = "Paiements de solidarité"
+        ordering = ['-date_paiement']
+        # ❌ RETIRER unique_together car on peut payer en plusieurs fois
+        # unique_together = [['membre', 'session']]
+        
+    def save(self, *args, **kwargs):
+        # Sauvegarde et alimentation du fonds social en transaction
+        with transaction.atomic():
+            is_new = getattr(self, '_state', None) and getattr(self._state, 'adding', True)
+            super().save(*args, **kwargs)
+
+            if is_new and self.montant and self.montant > 0:
+                try:
+                    fonds = FondsSocial.get_fonds_actuel()
+                    if fonds:
+                        desc = f"Solidarité {self.membre.numero_membre} - Session {self.session.nom}"
+                        fonds.ajouter_montant(self.montant, description=desc)
+                        print(f"Debug: ajout effectué {self.montant}")
+                    else:
+                        print("Aucun fonds social actuel trouvé pour enregistrer la solidarité.")
+                except Exception as e:
+                    print(f"Erreur lors de l'alimentation du fonds social: {e}")
+                    
+            is_new = self.pk is None
+
+            # ✅ LOGIC AMÉLIORÉE: Enregistrer le montant dû au moment du paiement
+            if is_new and not self.montant_solidarite_du:
+                from core.models import ConfigurationMutuelle
+                config = ConfigurationMutuelle.get_configuration()
+                self.montant_solidarite_du = config.montant_solidarite
+                print(f"💰 Solidarité session {self.session.nom}: montant dû = {self.montant_solidarite_du}")
+
+            # ✅ NOUVELLE LOGIQUE: Période de grâce de 3 mois par exercice
+            try:
+                from core.models import Membre
+                peut_definir_statuts = Membre.peut_definir_statuts_membre(membre=self.membre)
+                
+                if not peut_definir_statuts:
+                    # Période de grâce: membre reste EN_REGLE
+                    print("⏳ SOLIDARITÉ: Période de grâce → membre reste EN_REGLE")
+                    self.membre.statut = 'EN_REGLE'
+                    self.membre.save()
+                else:
+                    # Après période de grâce: évaluation normale
+                    if self.membre.calculer_statut_en_regle():
+                        self.membre.statut = 'EN_REGLE'
+                        self.membre.save()
+                    else:
+                        self.membre.statut = 'NON_EN_REGLE'
+                        self.membre.save()
+            except Exception as e:
+                print(f"Erreur de calcul de statut en règle: {e}")
+                pass
+        
+    
+    def __str__(self):
+        return f"{self.membre.numero_membre} - Session {self.session.nom} - {self.montant:,.0f} FCFA"
+
+            # Alimenter le fonds social
+#             if is_new:
+#                 from core.models import FondsSocial
+#                 fonds = FondsSocial.get_fonds_actuel()
+#                 if fonds:
+#                     fonds.ajouter_montant(
+#                         self.montant,
+#                         f"Inscription {self.membre.numero_membre} - Session {self.session.nom}"
+#                     )
+    
+    
+    def __str__(self):
+        return f"{self.membre.numero_membre} - {self.montant:,.0f} FCFA ({self.date_paiement.date()})"
 
 
 
@@ -240,6 +336,110 @@ class Emprunt(models.Model):
         nouveau_statut = 'EN_COURS'
         print(f"   🔄 Emprunt en cours normal -> {nouveau_statut}")
         return nouveau_statut
+
+    #redistribution des 15k de penalite
+
+    def _redistribuer_penalite(self, montant_a_redistribuer, tag_palier):
+    
+        if montant_a_redistribuer <= 0:
+            return
+
+        total_global = Decimal('0')
+        epargnes_membres = []
+
+        tous_membres = Membre.objects.filter(actif=True)
+        for m in tous_membres:
+            e = m.calculer_epargne_pure()
+            if e > 0:
+                total_global += e
+                epargnes_membres.append({'membre': m, 'montant': e})
+
+        if total_global <= 0:
+            print("⚠️ Aucune épargne globale trouvée, redistribution annulée.")
+            return
+
+        with transaction.atomic():
+            for item in epargnes_membres:
+                part = (item['montant'] / total_global) * montant_a_redistribuer
+                part = part.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+                if part > 0:
+                    Interet.objects.create(
+                        membre=item['membre'],
+                        emprunt_source=self,
+                        exercice=self.session_emprunt.exercice,
+                        session=self.session_emprunt,
+                        montant=part
+                    )
+                    EpargneTransaction.objects.create(
+                        membre=item['membre'],
+                        type_transaction='AJOUT_INTERET',
+                        montant=part,
+                        session=self.session_emprunt,
+                        notes=(
+                            f"Pénalité retard {tag_palier} sur prêt de "
+                            f"{self.membre.numero_membre}: {part:,.0f} FCFA"
+                        )
+                    )
+
+        print(f"✅ Redistribution de {montant_a_redistribuer:,.0f} FCFA ({tag_palier}) terminée.")
+    
+    #recalcul des pourcentages apres chaque 3 sessions
+    def capitaliser_interets_retard(self):
+        from core.models import ConfigurationMutuelle, Session
+        from decimal import Decimal
+        import datetime
+
+        # 1. On compte les sessions TERMINEES strictement après l'octroi
+        sessions_passees = Session.objects.filter(
+            date_session__gt=self.session_emprunt.date_session,
+            statut='TERMINEE'
+        ).count()
+
+        print(f"🔍 Audit {self.membre}: {sessions_passees} sessions écoulées")
+
+        # 2. Condition Modulo 3 (Tous les 3, 6, 9... mois)
+        if sessions_passees > 0 and sessions_passees % 3 == 0 and self.statut != 'REMBOURSE':
+            
+            # SECURITÉ : On vérifie si ce palier précis a déjà été appliqué
+            # Exemple : "Palier 3", "Palier 6", etc.
+            tag_palier = f"Palier-{sessions_passees}"
+            if tag_palier in (self.notes or ""):
+                print(f"⏭️ Palier {sessions_passees} déjà facturé. Repos.")
+                return False
+
+            config = ConfigurationMutuelle.objects.first()
+            if not config or config.taux_interet <= 0:
+                return False
+            
+            # 3. Calcul de la pénalité sur le RESTE à payer
+            taux = config.taux_interet / Decimal('100')
+            reste = self.montant_total_a_rembourser - self.montant_rembourse
+            
+            if reste > 0:
+                
+                PENALITE_FIXE = Decimal('15000')
+                penalite_taux = reste * taux
+                penalite_totale = penalite_taux + PENALITE_FIXE
+
+                self.montant_total_a_rembourser += penalite_totale
+                self.statut = 'EN_RETARD'
+
+                date_str = datetime.datetime.now().strftime("%d/%m/%Y")
+                note_entree = (
+                    f"\n[{date_str}] Pénalité retard ({tag_palier}): "
+                    f"+{penalite_taux:,.0f} FCFA (intérêt taux) "
+                    f"+ {PENALITE_FIXE:,.0f} FCFA (pénalité fixe) "
+                    f"= +{penalite_totale:,.0f} FCFA total"
+                )
+                self.notes = (self.notes or "") + note_entree
+
+                self.save()
+                self._redistribuer_penalite(penalite_totale, tag_palier)
+
+                print(f"💰 SUCCÈS : +{penalite_totale:,.0f} FCFA ajoutés (Cycle {sessions_passees}/3)")
+                return True
+        return False
     
     def capitaliser_interets_retard(self):
         from core.models import ConfigurationMutuelle, Session

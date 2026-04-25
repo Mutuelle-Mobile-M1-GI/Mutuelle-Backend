@@ -815,7 +815,7 @@ class GestionMembresViewSet(viewsets.ViewSet):
                     print(f"   - ID: {remboursement.id}")
                     print(f"   - Montant total: {remboursement.montant}")
                     print(f"   - Montant capital: {getattr(remboursement, 'montant_capital', 'N/A')}")
-                    print(f"   - Montant intérêt: {getattr(remboursement, 'montant_interet', 'N/A')}")
+                    print(f"   - Montant intérêt: {getattr(remboursement, 'montant_', 'N/A')}")
                     print(f"   - Date: {remboursement.date_remboursement}")
                     print(f"   - Session: {remboursement.session.nom}")
                     print(f"   - Notes: '{remboursement.notes}'")
@@ -969,7 +969,7 @@ class GestionMembresViewSet(viewsets.ViewSet):
                     # ✅ NOUVELLE LOGIQUE: Période de grâce de 3 mois par exercice
                     # Déterminer le statut selon la période de grâce
                     
-                   
+                    
                     peut_definir_statuts = Membre.peut_definir_statuts_membre(membre)
                     
                     if not peut_definir_statuts:
