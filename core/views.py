@@ -12,7 +12,7 @@ from .serializers import (
     ConfigurationMutuelleSerializer, ExerciceSerializer, SessionSerializer,
     TypeAssistanceSerializer, MembreSerializer, FondsSocialSerializer,
     CaisseInscriptionSerializer, DonneesAdministrateurSerializer,
-    EmpruntCoefficientTierSerializer
+    EmpruntCoefficientTierSerializer, SessionDepenseSerializer
 )
 from .utils import calculer_donnees_administrateur
 from authentication.permissions import IsAdministrateur, IsAdminOrReadOnly
@@ -363,6 +363,57 @@ class SessionViewSet(viewsets.ModelViewSet):
             'data': serializer.data
         }, status=status.HTTP_200_OK)
     
+    @action(detail=False, methods=['get'], permission_classes=[AllowAny], url_path='depenses')
+    def depenses(self, request):
+        """
+        Retourne la liste des dépenses de session (collation + autres dépenses).
+
+        Filtres optionnels (query params) :
+        - exercice (UUID) : filtrer par exercice
+        - session  (UUID) : filtrer une session précise
+        - type     : 'collation' | 'autre' | 'all' (défaut : 'all')
+        """
+        from decimal import Decimal
+        from django.db.models import Sum
+
+        qs = Session.objects.select_related('exercice').all()
+
+        # Filtre par exercice
+        exercice_id = request.query_params.get('exercice')
+        if exercice_id:
+            qs = qs.filter(exercice__id=exercice_id)
+
+        # Filtre par session précise
+        session_id = request.query_params.get('session')
+        if session_id:
+            qs = qs.filter(id=session_id)
+
+        # Filtre par type de dépense
+        type_depense = request.query_params.get('type', 'all')
+        if type_depense == 'collation':
+            qs = qs.filter(montant_collation__gt=0)
+        elif type_depense == 'autre':
+            qs = qs.filter(montant_autre_depense__gt=0)
+        # 'all' → pas de filtre supplémentaire
+
+        # Agréger les totaux
+        totaux = qs.aggregate(
+            total_collation=Sum('montant_collation'),
+            total_autre_depense=Sum('montant_autre_depense'),
+        )
+        total_collation = totaux['total_collation'] or Decimal('0')
+        total_autre_depense = totaux['total_autre_depense'] or Decimal('0')
+
+        serializer = SessionDepenseSerializer(qs, many=True)
+
+        return Response({
+            'total_collation': total_collation,
+            'total_autre_depense': total_autre_depense,
+            'total_general': total_collation + total_autre_depense,
+            'nombre_sessions': qs.count(),
+            'depenses': serializer.data,
+        })
+
     def destroy(self, request, *args, **kwargs):
         """
         Suppression sécurisée d'une session

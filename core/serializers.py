@@ -360,6 +360,34 @@ class DonneesAdministrateurSerializer(serializers.Serializer):
             'terminees': sessions_terminees
         }
 from .models import EmpruntCoefficientTier
+
+
+class SessionDepenseSerializer(serializers.ModelSerializer):
+    """
+    Serializer pour exposer les dépenses liées à une session
+    (collation + autres dépenses).
+    """
+    exercice_id = serializers.UUIDField(source='exercice.id', read_only=True)
+    exercice_nom = serializers.CharField(source='exercice.nom', read_only=True)
+    total_depenses = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Session
+        fields = [
+            'id',
+            'nom',
+            'date_session',
+            'exercice_id',
+            'exercice_nom',
+            'montant_collation',
+            'montant_autre_depense',
+            'motif_autre_depense',
+            'total_depenses',
+        ]
+
+    def get_total_depenses(self, obj):
+        from decimal import Decimal
+        return (obj.montant_collation or Decimal('0')) + (obj.montant_autre_depense or Decimal('0'))
 class EmpruntCoefficientTierSerializer(serializers.ModelSerializer):
     """
     Serializer pour les tranches de coefficient d'emprunt

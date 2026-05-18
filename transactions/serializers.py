@@ -58,53 +58,94 @@ class PaiementInscriptionSerializer(serializers.ModelSerializer):
 
 class PaiementSolidariteSerializer(serializers.ModelSerializer):
     """
-    Serializer pour les paiements de solidarité
+    Serializer pour les paiements de solidarité.
+    Expose également pour chaque enregistrement :
+    - montant_paye_exercice_en_cours : ce que le membre a déjà versé sur l'exercice en cours
+    - montant_reporte             : dette reportée de l'exercice précédent (SolidariteExerciceReport)
     """
     membre_info = MembreSimpleSerializer(source='membre', read_only=True)
     session_nom = serializers.CharField(source='session.nom', read_only=True)
+
+    # ── Champs calculés pour la barre de progression frontend ──────────────
+    montant_paye_exercice_en_cours = serializers.SerializerMethodField()
+    montant_reporte = serializers.SerializerMethodField()
 
     class Meta:
         model = PaiementSolidarite
         fields = [
             'id', 'membre', 'membre_info', 'session', 'session_nom',
-            'montant', 'montant_solidarite_du', 'date_paiement', 'notes'
+            'montant', 'montant_solidarite_du', 'date_paiement', 'notes',
+            'montant_paye_exercice_en_cours', 'montant_reporte',
         ]
         extra_kwargs = {
             'montant_solidarite_du': {'required': False, 'read_only': False},
         }
-    '''
-        il faut modifier cette methode de sorte qu'elle prennet en compte les sessions : 
-        celle a laquelle on paye et celle pour laquelle on paye
-    '''
+
+    # ── get_montant_paye_exercice_en_cours ──────────────────────────────────
+    def get_montant_paye_exercice_en_cours(self, obj):
+        """
+        Total des paiements de solidarité de ce membre sur l'exercice en cours.
+        """
+        from django.db.models import Sum
+        from decimal import Decimal
+        from core.models import Exercice
+
+        exercice = Exercice.get_exercice_en_cours()
+        if not exercice:
+            return Decimal('0')
+
+        total = PaiementSolidarite.objects.filter(
+            membre=obj.membre,
+            session__exercice=exercice,
+        ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+        return total
+
+    # ── get_montant_reporte ─────────────────────────────────────────────────
+    def get_montant_reporte(self, obj):
+        """
+        Montant reporté de l'exercice précédent pour ce membre.
+        Positif = dette à payer, Négatif = surplus (crédit).
+        Retourne 0 s'il n'y a pas de report.
+        """
+        from decimal import Decimal
+        from core.models import Exercice, SolidariteExerciceReport
+
+        exercice = Exercice.get_exercice_en_cours()
+        if not exercice:
+            return Decimal('0')
+
+        report = SolidariteExerciceReport.objects.filter(
+            membre=obj.membre,
+            exercice_cible=exercice,
+        ).first()
+        return report.montant_reporte if report else Decimal('0')
+
+    # ── create ──────────────────────────────────────────────────────────────
     def create(self, validated_data):
         """
-        Crée un paiement de solidarité en remplissant montant_solidarite_du
+        Crée un paiement de solidarité en remplissant montant_solidarite_du.
         Logique :
         - Premier paiement pour ce membre → utiliser montant de la configuration
         - Paiements suivants → utiliser le montant du premier paiement (pour cohérence)
         """
         from core.models import ConfigurationMutuelle
-        
-        # Si montant_solidarite_du n'est pas fourni, le déterminer automatiquement
+
         if 'montant_solidarite_du' not in validated_data or not validated_data.get('montant_solidarite_du'):
             membre = validated_data.get('membre')
             session = validated_data.get('session')
-            
-            # Chercher le PREMIER paiement de solidarité de ce membre (toutes sessions confondues)
+
             premier_paiement = PaiementSolidarite.objects.filter(
                 membre=membre
             ).order_by('date_paiement').first()
-            
+
             if not premier_paiement:
-                # C'est le PREMIER paiement de solidarité de ce membre
                 config = ConfigurationMutuelle.get_configuration()
                 validated_data['montant_solidarite_du'] = config.montant_solidarite
                 print(f"📝 Premier paiement solidarité pour {membre.numero_membre}: montant dû = {validated_data['montant_solidarite_du']} FCFA")
             else:
-                # C'est un paiement suivant, récupérer le montant du premier paiement (cohérence)
                 validated_data['montant_solidarite_du'] = premier_paiement.montant_solidarite_du
                 print(f"📝 Paiement suivant pour {membre.numero_membre} (session {session.nom}): montant dû = {validated_data['montant_solidarite_du']} FCFA (du premier paiement)")
-        
+
         return super().create(validated_data)
 
 class EpargneTransactionSerializer(serializers.ModelSerializer):
