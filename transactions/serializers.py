@@ -148,6 +148,15 @@ class PaiementSolidariteSerializer(serializers.ModelSerializer):
 
         return super().create(validated_data)
 
+    def validate(self, data):
+        membre = data.get('membre') or (self.instance.membre if self.instance else None)
+        if membre and not membre.inscription_terminee:
+            raise serializers.ValidationError(
+                "Le membre n'a pas terminé son inscription. "
+                "Le paiement de solidarité est interdit tant que l'inscription n'est pas complète."
+            )
+        return data
+
 class EpargneTransactionSerializer(serializers.ModelSerializer):
     """
     Serializer pour les transactions d'épargne
@@ -163,9 +172,16 @@ class EpargneTransactionSerializer(serializers.ModelSerializer):
             'montant', 'session', 'session_nom', 'date_transaction', 'notes'
         ]
     
+    def validate(self, data):
+        membre = data.get('membre') or (self.instance.membre if self.instance else None)
+        if membre and not membre.inscription_terminee:
+            raise serializers.ValidationError(
+                "Le membre n'a pas terminé son inscription. "
+                "Il ne peut pas effectuer d'opérations d'épargne tant que l'inscription n'est pas complète."
+            )
+        return data
+
     def create(self, validated_data):
-        # On supprime simplement la logique de solidarité qui n'appartient pas à l'épargne
-        # ou on s'assure qu'elle ne bloque pas la création.
         return super().create(validated_data)
 
 class EmpruntSerializer(serializers.ModelSerializer):
