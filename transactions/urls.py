@@ -11,6 +11,13 @@ router.register(r'remboursements', views.RemboursementViewSet)
 router.register(r'assistances', views.AssistanceAccordeeViewSet)
 router.register(r'renflouements', views.RenflouementViewSet)
 router.register(r'paiements-renflouement', views.PaiementRenflouementViewSet)
+# Nouveaux endpoints pour les pénalités
+router.register(r'penalites-emprunt', views.PenaliteEmpruntViewSet)
+router.register(r'emprunts-suivi', views.EmpruntDetailViewSet, basename='emprunt-suivi')
+# Nouveaux endpoints pour les renflouements proportionnels
+router.register(r'repartitions-renflouement', views.RepartitionRenflouementExerciceViewSet)
+router.register(r'renflouements-proportionnels', views.RenflouementProportionnelViewSet, basename='renflouement-proportionnel')
+router.register(r'paiements-renflouement-proportionnels', views.PaiementRenflouementProportionnelViewSet, basename='paiement-renflouement-proportionnel')
 
 urlpatterns = [
     # 1. On intercepte l'URL des statistiques d'épargne AVANT que le router ne cherche un ID
@@ -23,6 +30,45 @@ urlpatterns = [
         views.AssistanceAccordeeViewSet.as_view({'get': 'par_membre'}), 
         name='assistances-par-membre'),
     
-    # 3. On inclut le reste des routes automatiques
+    # 3. Endpoints spécifiques pour les pénalités
+    path('penalites-emprunt/statistiques/', 
+        views.PenaliteEmpruntViewSet.as_view({'get': 'statistiques'}), 
+        name='penalites-stats'),
+    
+    path('penalites-emprunt/par_emprunt/', 
+        views.PenaliteEmpruntViewSet.as_view({'get': 'par_emprunt'}), 
+        name='penalites-par-emprunt'),
+    
+    # 4. Endpoint pour l'historique complet d'un emprunt
+    path('emprunts-suivi/<uuid:pk>/historique_complet/', 
+        views.EmpruntDetailViewSet.as_view({'get': 'historique_complet'}), 
+        name='emprunt-historique-complet'),
+    
+    # 5. Endpoints spécifiques pour les renflouements proportionnels
+    path('repartitions-renflouement/calculer_renflouements/', 
+        views.RepartitionRenflouementExerciceViewSet.as_view({'post': 'calculer_renflouements'}), 
+        name='calculer-renflouements'),
+    
+    path('renflouements-proportionnels/proportionnels/', 
+        views.RenflouementProportionnelViewSet.as_view({'get': 'proportionnels'}), 
+        name='renflouements-proportionnels'),
+    
+    path('renflouements-proportionnels/anciens/', 
+        views.RenflouementProportionnelViewSet.as_view({'get': 'anciens'}), 
+        name='renflouements-anciens'),
+    
+    path('renflouements-proportionnels/statistiques_proportionnelles/', 
+        views.RenflouementProportionnelViewSet.as_view({'get': 'statistiques_proportionnelles'}), 
+        name='stats-renflouements-proportionnels'),
+    
+    path('paiements-renflouement-proportionnels/avec_repartition/', 
+        views.PaiementRenflouementProportionnelViewSet.as_view({'get': 'avec_repartition'}), 
+        name='paiements-avec-repartition'),
+    
+    path('paiements-renflouement-proportionnels/par_exercice/', 
+        views.PaiementRenflouementProportionnelViewSet.as_view({'get': 'par_exercice'}), 
+        name='paiements-par-exercice'),
+    
+    # 6. On inclut le reste des routes automatiques
     path('', include(router.urls)),
 ]

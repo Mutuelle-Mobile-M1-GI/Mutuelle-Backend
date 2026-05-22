@@ -257,17 +257,18 @@ class MembreSerializer(serializers.ModelSerializer):
     exercice_inscription_nom = serializers.CharField(source='exercice_inscription.nom', read_only=True)
     session_inscription_nom = serializers.CharField(source='session_inscription.nom', read_only=True)
     is_en_regle = serializers.ReadOnlyField()
-    
+    is_actif = serializers.ReadOnlyField()
+
     # TOUTES LES DONNÉES FINANCIÈRES CALCULÉES
     donnees_financieres = serializers.SerializerMethodField()
-    
+
     class Meta:
         model = Membre
         fields = [
             'id', 'utilisateur', 'numero_membre', 'date_inscription', 'statut',
             'exercice_inscription', 'exercice_inscription_nom',
             'session_inscription', 'session_inscription_nom',
-            'is_en_regle', 'donnees_financieres',
+            'is_en_regle', 'is_actif', 'donnees_financieres',
             'date_creation', 'date_modification'
         ]
     

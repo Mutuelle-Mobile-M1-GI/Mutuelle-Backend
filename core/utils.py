@@ -43,12 +43,44 @@ def calculer_cumul_epargnes_total():
         'nombre_membres': membres_actifs.count()
     }
 
+
+def calculer_tresor_disponible():
+    """
+    ✅ NOUVEAU : Calcule les liquidités réellement disponibles dans le trésor
+    pour les emprunts (entrées - sorties)
+    """
+    from transactions.models import EpargneTransaction
+    from django.db.models import Sum
+    from decimal import Decimal
+    
+    TYPES_ENTREES_TRESOR = ['DEPOT', 'RETOUR_REMBOURSEMENT']
+    
+    total_entrees = EpargneTransaction.objects.filter(
+        type_transaction__in=TYPES_ENTREES_TRESOR,
+        montant__gt=0
+    ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+    
+    total_sorties = EpargneTransaction.objects.filter(
+        type_transaction='RETRAIT_PRET',
+        montant__lt=0
+    ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+    
+    tresor_disponible = total_entrees + total_sorties  # total_sorties est déjà négatif
+    
+    return {
+        'total_entrees': total_entrees,
+        'total_sorties': total_sorties,
+        'tresor_disponible': tresor_disponible,
+        'peut_emprunter': tresor_disponible > 0
+    }
+
 def calculer_donnees_administrateur():
     """
     Calcule toutes les données que l'administrateur doit voir
     """
     fonds_social = calculer_fonds_social_total()
     tresor = calculer_cumul_epargnes_total()
+    tresor_disponible = calculer_tresor_disponible()  # ✅ NOUVEAU
     
     # Calcul des montants attendus (emprunts en cours)
     from transactions.models import Emprunt
@@ -61,13 +93,16 @@ def calculer_donnees_administrateur():
     return {
         'fonds_social': fonds_social,
         'tresor': tresor,
+        'tresor_disponible': tresor_disponible,  # ✅ NOUVEAU
         'emprunts_en_cours': {
             'nombre': emprunts_en_cours.count(),
             'montant_total_attendu': montant_attendu_emprunts
         },
         'situation_globale': {
             'liquidites_totales': fonds_social['montant_total'] + tresor['cumul_total_epargnes'],
-            'engagements_totaux': montant_attendu_emprunts
+            'tresor_liquide': tresor_disponible['tresor_disponible'],  # ✅ NOUVEAU
+            'engagements_totaux': montant_attendu_emprunts,
+            'peut_emprunter': tresor_disponible['peut_emprunter']  # ✅ NOUVEAU
         }
     }
 

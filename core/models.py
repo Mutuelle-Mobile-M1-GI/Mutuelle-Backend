@@ -520,71 +520,139 @@ class Exercice(models.Model):
 
     def creer_renflouements_fin_exercice(self):
         """
-        ✅ NOUVELLE MÉTHODE: Crée les renflouements à la fin de l'exercice
+        ✅ NOUVELLE MÉTHODE: Crée les renflouements proportionnels à la fin de l'exercice
         
         Logique:
-        1. Récupérer le total des dépenses de l'exercice
-        2. Diviser le montant entre les membres EN_REGLE
-        3. Créer un renflouement par membre
+        1. Calculer les sorties de la caisse inscription et du fonds social
+        2. Calculer les ratios de répartition
+        3. Diviser le montant total entre les membres EN_REGLE
+        4. Attribuer le même montant aux membres NON_EN_REGLE
+        5. Créer les renflouements avec les ratios calculés
         
         Returns:
-            dict: {
-                'total_depenses': Decimal,
-                'nombre_membres': int,
-                'montant_par_membre': Decimal,
-                'renflouements_crees': int
-            }
+            dict: Résultats détaillés du calcul
         """
-        from transactions.models import Renflouement
+        from transactions.models import Renflouement, RepartitionRenflouementExercice
         
         result = {
-            'total_depenses': Decimal('0'),
-            'nombre_membres': 0,
+            'total_sorties_caisse': Decimal('0'),
+            'total_sorties_fonds': Decimal('0'),
+            'total_sorties_global': Decimal('0'),
+            'ratio_caisse': Decimal('0'),
+            'ratio_fonds': Decimal('0'),
+            'nombre_membres_en_regle': 0,
+            'nombre_membres_non_en_regle': 0,
             'montant_par_membre': Decimal('0'),
-            'renflouements_crees': 0
+            'renflouements_crees': 0,
+            'repartition_id': None
         }
         
-        print(f"\n📋 CRÉATION DES RENFLOUEMENTS FIN D'EXERCICE: {self.nom}")
-        print(f"{'='*70}")
+        print(f"\n📋 CRÉATION DES RENFLOUEMENTS PROPORTIONNELS FIN D'EXERCICE: {self.nom}")
+        print(f"{'='*80}")
         
-        # 1. Récupérer le total des dépenses de cet exercice
-        total_depenses = DépenseExercice.objects.filter(
-            exercice=self
-        ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
-        
-        result['total_depenses'] = total_depenses
-        
-        if total_depenses == 0:
-            print("⚠️  Aucune dépense enregistrée pour cet exercice.")
-            return result
-        
-        print(f"💰 Total des dépenses: {total_depenses:,.0f} FCFA")
-        
-        # 2. Récupérer les membres EN_REGLE
-        membres_en_regle = Membre.objects.filter(
-            statut='EN_REGLE'
-        ).count()
-        
-        result['nombre_membres'] = membres_en_regle
-        
-        if membres_en_regle == 0:
-            print("⚠️  Aucun membre EN_REGLE pour recevoir les renflouements.")
-            return result
-        
-        print(f"👥 Nombre de membres EN_REGLE: {membres_en_regle}")
-        
-        # 3. Calculer le montant par membre
-        montant_par_membre = (total_depenses / membres_en_regle).quantize(
-            Decimal('0.01'), rounding=ROUND_HALF_UP
-        )
-        
-        result['montant_par_membre'] = montant_par_membre
-        print(f"📊 Montant par membre: {montant_par_membre:,.0f} FCFA")
-        
-        # 4. Créer les renflouements dans une transaction atomique
         try:
             with transaction.atomic():
-                # Récupérer la dernière session de l'exercice
+                # 1. Calculer les sorties à partir des DépenseExercice
+                from transactions.models import DépenseExercice
+                
+                # Les sorties incluent TOUTES les dépenses de l'exercice
+                sorties_total = DépenseExercice.objects.filter(
+                    exercice=self
+                ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+                
+                # Répartition par type (optionnel, pour les ratios)
+                sorties_caisse = DépenseExercice.objects.filter(
+                    exercice=self,
+                    type_depense__in=['COLLATION', 'AUTRE']
+                ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+                
+                sorties_fonds = DépenseExercice.objects.filter(
+                    exercice=self,
+                    type_depense='ASSISTANCE'
+                ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+                
+                result['total_sorties_caisse'] = sorties_caisse
+                result['total_sorties_fonds'] = sorties_fonds
+                
+                print(f"💳 Sorties caisse inscription (collation+autre): {sorties_caisse:,.0f} FCFA")
+                print(f"🏦 Sorties fonds social (assistance): {sorties_fonds:,.0f} FCFA")
+                
+                # 2. Calculer le total et les ratios
+                total_sorties = sorties_total
+                result['total_sorties_global'] = total_sorties
+                
+                if total_sorties == 0:
+                    print("⚠️  Aucune dépense enregistrée pour cet exercice.")
+                    return result
+                
+                print(f"💰 Total sorties (dépenses): {total_sorties:,.0f} FCFA")
+                
+                # Calcul des ratios
+                ratio_caisse = ((sorties_caisse / total_sorties) * 100).quantize(
+                    Decimal('0.01'), rounding=ROUND_HALF_UP
+                ) if total_sorties > 0 else Decimal('0')
+                ratio_fonds = ((sorties_fonds / total_sorties) * 100).quantize(
+                    Decimal('0.01'), rounding=ROUND_HALF_UP
+                ) if total_sorties > 0 else Decimal('0')
+                
+                result['ratio_caisse'] = ratio_caisse
+                result['ratio_fonds'] = ratio_fonds
+                
+                print(f"📊 Ratio caisse inscription: {ratio_caisse}%")
+                print(f"📊 Ratio fonds social: {ratio_fonds}%")
+                
+                # 3. Compter les membres
+                membres_en_regle = Membre.objects.filter(
+                    statut='EN_REGLE', actif=True
+                ).count()
+                
+                membres_non_en_regle = Membre.objects.filter(
+                    statut__in=['NON_EN_REGLE', 'NON_DEFINI'], actif=True
+                ).count()
+                
+                membres_total = membres_en_regle + membres_non_en_regle
+                
+                result['nombre_membres_en_regle'] = membres_en_regle
+                result['nombre_membres_non_en_regle'] = membres_non_en_regle
+                
+                print(f"👥 Membres en règle: {membres_en_regle}")
+                print(f"👥 Membres non en règle: {membres_non_en_regle}")
+                print(f"👥 Total membres actifs: {membres_total}")
+                
+                if membres_en_regle == 0:
+                    print("⚠️  Aucun membre EN_REGLE pour calculer la répartition.")
+                    return result
+                
+                # 5. Calculer le montant par membre (basé sur les membres en règle)
+                montant_par_membre = (total_sorties / membres_en_regle).quantize(
+                    Decimal('0.01'), rounding=ROUND_HALF_UP
+                )
+                
+                result['montant_par_membre'] = montant_par_membre
+                print(f"💵 Montant par membre: {montant_par_membre:,.0f} FCFA")
+                print(f"📐 Formule: {total_sorties:,.0f} ÷ {membres_en_regle} membres en règle = {montant_par_membre:,.0f} FCFA")
+                print(f"🎯 TOUS les {membres_total} membres actifs payeront ce montant")
+                print(f"💰 Total à collecter: {membres_total} × {montant_par_membre:,.0f} = {membres_total * montant_par_membre:,.0f} FCFA")
+                
+                # 6. Créer l'enregistrement de répartition pour traçabilité
+                repartition = RepartitionRenflouementExercice.objects.create(
+                    exercice=self,
+                    total_sorties_caisse_inscription=sorties_caisse,
+                    total_sorties_fonds_social=sorties_fonds,
+                    total_sorties_global=total_sorties,
+                    ratio_caisse_inscription=ratio_caisse,
+                    ratio_fonds_social=ratio_fonds,
+                    nombre_membres_en_regle=membres_en_regle,
+                    nombre_membres_non_en_regle=membres_non_en_regle,
+                    nombre_membres_total=membres_total,
+                    montant_par_membre=montant_par_membre,
+                    notes_calcul=f"Calcul automatique fin d'exercice {self.nom}"
+                )
+                
+                result['repartition_id'] = str(repartition.id)
+                print(f"📋 Répartition enregistrée avec ID: {repartition.id}")
+                
+                # 7. Créer les renflouements pour TOUS LES MEMBRES (en règle ET non en règle)
                 derniere_session = Session.objects.filter(
                     exercice=self
                 ).order_by('-date_session').first()
@@ -593,13 +661,18 @@ class Exercice(models.Model):
                     print("⚠️  Aucune session trouvée pour cet exercice.")
                     return result
                 
-                membres = Membre.objects.filter(statut='EN_REGLE')
+                # ✅ CORRECTION : TOUS les membres actifs doivent payer
+                tous_les_membres = Membre.objects.filter(actif=True)
                 
-                for membre in membres:
+                print(f"\n🔄 Création des renflouements pour TOUS les membres...")
+                print(f"📊 Logique : {total_sorties:,.0f} FCFA ÷ {membres_en_regle} membres en règle = {montant_par_membre:,.0f} FCFA")
+                print(f"👥 TOUS les {tous_les_membres.count()} membres actifs payeront {montant_par_membre:,.0f} FCFA")
+                
+                for membre in tous_les_membres:
                     # Vérifier que le renflouement n'existe pas déjà
                     exists = Renflouement.objects.filter(
                         membre=membre,
-                        session=derniere_session,
+                        exercice_renflouement=self,
                         type_cause='RENFLOUEMENT_FIN_EXERCICE'
                     ).exists()
                     
@@ -610,18 +683,32 @@ class Exercice(models.Model):
                             montant_du=montant_par_membre,
                             montant_paye=Decimal('0'),
                             type_cause='RENFLOUEMENT_FIN_EXERCICE',
-                            cause=f"Renflouement de fin d'exercice {self.nom} - Total dépenses: {total_depenses:,.0f} FCFA"
+                            exercice_renflouement=self,
+                            ratio_caisse_inscription=ratio_caisse,
+                            ratio_fonds_social=ratio_fonds,
+                            cause=(
+                                f"Renflouement proportionnel fin d'exercice {self.nom}. "
+                                f"Répartition: {ratio_caisse}% caisse inscription, {ratio_fonds}% fonds social. "
+                                f"Calcul: {total_sorties:,.0f} FCFA ÷ {membres_en_regle} membres en règle = {montant_par_membre:,.0f} FCFA par membre. "
+                                f"TOUS les membres actifs payent ce montant."
+                            )
                         )
                         result['renflouements_crees'] += 1
-                        print(f"   ✅ Renflouement créé pour {membre.numero_membre}")
+                        print(f"   ✅ Renflouement créé pour {membre.numero_membre} ({membre.statut})")
                     else:
                         print(f"   ⚠️  Renflouement déjà existant pour {membre.numero_membre}")
                 
-                print(f"\n✅ {result['renflouements_crees']} renflouement(s) créé(s) avec succès")
-                print(f"{'='*70}\n")
+                print(f"\n✅ {result['renflouements_crees']} renflouement(s) proportionnel(s) créé(s)")
+                print(f"💰 Total à collecter: {tous_les_membres.count()} membres × {montant_par_membre:,.0f} = {tous_les_membres.count() * montant_par_membre:,.0f} FCFA")
+                print(f"📊 Répartition future des paiements:")
+                print(f"   - {ratio_caisse}% → Caisse inscription")
+                print(f"   - {ratio_fonds}% → Fonds social")
+                print(f"{'='*80}\n")
                 
         except Exception as e:
-            print(f"❌ ERREUR lors de la création des renflouements: {e}")
+            print(f"❌ ERREUR lors de la création des renflouements proportionnels: {e}")
+            import traceback
+            print(traceback.format_exc())
             raise
         
         return result
@@ -1184,24 +1271,47 @@ class Membre(models.Model):
     
     def peut_emprunter(self, montant):
         """Vérifie si le membre peut emprunter un montant donné (nouvelle logique par tranches)"""
-        from transactions.models import Emprunt
+        from transactions.models import Emprunt, EpargneTransaction
+        from django.db.models import Sum
+        from decimal import Decimal
 
         if not self.is_actif:
-            return False, "se membre ne fait plus partie de la mutuelle"
+            return False, "Ce membre ne fait plus partie de la mutuelle"
+
         # 1. Vérifier qu'il n'a pas d'emprunt en cours
         if Emprunt.objects.filter(membre=self, statut='EN_COURS').exists():
             return False, "Vous avez déjà un emprunt en cours"
 
-        # 2. Vérifier qu'il est en règle
-        if not self.is_en_regle:
-            return False, "Vous devez être en règle pour emprunter"
+        # 2. ✅ NOUVEAU : Vérifier la disponibilité des fonds dans le trésor
+        TYPES_ENTREES_TRESOR = ['DEPOT', 'RETOUR_REMBOURSEMENT']
+        
+        total_entrees = EpargneTransaction.objects.filter(
+            type_transaction__in=TYPES_ENTREES_TRESOR,
+            montant__gt=0
+        ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+        
+        total_sorties = EpargneTransaction.objects.filter(
+            type_transaction='RETRAIT_PRET',
+            montant__lt=0
+        ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+        
+        tresor_disponible = total_entrees + total_sorties  # total_sorties est déjà négatif
+        
+        print(f"🏦 Vérification trésor pour {self.numero_membre}:")
+        print(f"   - Entrées: {total_entrees:,.0f} FCFA")
+        print(f"   - Sorties: {total_sorties:,.0f} FCFA")
+        print(f"   - Disponible: {tresor_disponible:,.0f} FCFA")
+        print(f"   - Demandé: {montant:,.0f} FCFA")
+        
+        if tresor_disponible < montant:
+            return False, f"Fonds insuffisants dans le trésor. Disponible: {tresor_disponible:,.0f} FCFA, Demandé: {montant:,.0f} FCFA"
 
         # 3. Récupérer l'exercice en cours
         exercice = Exercice.get_exercice_en_cours()
         if not exercice:
             return False, "Aucun exercice en cours"
 
-        # 4. Récupérer l'épargne totale
+        # 4. Récupérer l'épargne totale du membre
         epargne_totale = self.calculer_epargne_pure()
         if epargne_totale <= 0:
             return False, "Épargne insuffisante"
@@ -1215,15 +1325,21 @@ class Membre(models.Model):
         if not tier:
             return False, "Aucune règle de coefficient trouvée pour votre épargne"
 
-        # 6. Calculer le montant max
+        # 6. Calculer le montant max selon l'épargne
         montant_max = Decimal(epargne_totale) * tier.coefficient
         if tier.max_cap:
             montant_max = min(montant_max, tier.max_cap)
 
         if montant > montant_max:
-            return False, f"Montant maximum empruntable: {int(montant_max):,} FCFA"
+            return False, f"Montant maximum empruntable selon votre épargne: {int(montant_max):,} FCFA"
 
-        return True, f"Emprunt autorisé (max: {int(montant_max):,} FCFA)"
+        # 7. ✅ NOUVEAU : Vérifier que le montant demandé ne dépasse pas les fonds disponibles
+        montant_final = min(montant_max, tresor_disponible)
+        
+        if montant > montant_final:
+            return False, f"Montant maximum empruntable (limité par le trésor): {int(montant_final):,} FCFA"
+
+        return True, f"Emprunt autorisé (max épargne: {int(montant_max):,} FCFA, max trésor: {int(tresor_disponible):,} FCFA)"
 
 
     
@@ -1262,15 +1378,14 @@ class Membre(models.Model):
     @classmethod
     def peut_definir_statuts_membre(cls, membre):
         """
-        ✅ NOUVELLE LOGIQUE: Période de grâce de 3 mois par exercice
+        ✅ NOUVELLE LOGIQUE: Période de grâce de 3 sessions par exercice
 
         Règles:
         - Au début de chaque exercice: tous les membres sont EN_REGLE
-        - Période de grâce: 3 mois avant d'évaluer les statuts
-        - Après 3 mois: évaluation selon les critères normaux
+        - Période de grâce: 3 sessions avant d'évaluer les statuts
+        - Après 3 sessions: évaluation selon les critères normaux
         """
-        from core.models import Exercice
-        from datetime import timedelta
+        from core.models import Exercice, Session
         from django.utils import timezone
 
         # Récupérer l'exercice en cours
@@ -1279,19 +1394,23 @@ class Membre(models.Model):
             print(f"⏳ Membre {membre.numero_membre}: Pas d'exercice EN_COURS")
             return False
 
-        # Calculer si 3 mois se sont écoulés depuis le début de l'exercice
-        debut_exercice = exercice_actuel.date_debut
-        date_limite_grace = debut_exercice + timedelta(days=90)  # 3 mois = 90 jours
-        aujourd_hui = timezone.now().date()
+        # Compter le nombre de sessions terminées dans cet exercice
+        sessions_terminees = Session.objects.filter(
+            exercice=exercice_actuel,
+            statut='TERMINEE'
+        ).count()
 
-        if aujourd_hui < date_limite_grace:
+        # Période de grâce = 3 sessions
+        PERIODE_GRACE_SESSIONS = 3
+
+        if sessions_terminees < PERIODE_GRACE_SESSIONS:
             # Encore dans la période de grâce
-            jours_restants = (date_limite_grace - aujourd_hui).days
-            print(f"⏳ Membre {membre.numero_membre}: Période de grâce ({jours_restants} jours restants)")
+            sessions_restantes = PERIODE_GRACE_SESSIONS - sessions_terminees
+            print(f"⏳ Membre {membre.numero_membre}: Période de grâce ({sessions_restantes} session(s) restante(s) sur {PERIODE_GRACE_SESSIONS})")
             return False
         else:
             # Période de grâce terminée, on peut évaluer
-            print(f"✅ Membre {membre.numero_membre}: Période de grâce terminée, évaluation possible")
+            print(f"✅ Membre {membre.numero_membre}: Période de grâce terminée ({sessions_terminees} sessions terminées), évaluation possible")
             return True
 
 

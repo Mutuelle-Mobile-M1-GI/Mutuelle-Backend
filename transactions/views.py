@@ -32,13 +32,15 @@ from core.models import Membre, Session, TypeAssistance
 from .models import (
     PaiementInscription, PaiementSolidarite, EpargneTransaction,
     Emprunt, Remboursement, AssistanceAccordee, Renflouement,
-    PaiementRenflouement
+    PaiementRenflouement, PenaliteEmprunt, RepartitionRenflouementExercice
 )
 from .serializers import (
     PaiementInscriptionSerializer, PaiementSolidariteSerializer,
     EpargneTransactionSerializer, EmpruntSerializer, RemboursementSerializer,
     AssistanceAccordeeSerializer, RenflouementSerializer,
-    PaiementRenflouementSerializer, StatistiquesTransactionsSerializer
+    PaiementRenflouementSerializer, StatistiquesTransactionsSerializer,
+    PenaliteEmpruntSerializer, EmpruntDetailAvecPenalitesSerializer,
+    RepartitionRenflouementExerciceSerializer
 )
 from authentication.permissions import IsAdministrateur, IsAdminOrReadOnly
 
@@ -572,24 +574,23 @@ class EmpruntViewSet(viewsets.ModelViewSet):
                 membre = Membre.objects.select_related('utilisateur').get(id=membre_id)
                 print(f"✅ Membre trouvé: {membre.numero_membre} - {membre.utilisateur.nom_complet}")
                 print(f"   - Statut: {membre.statut}")
-                print(f"   - En règle: {membre.is_en_regle}")
-                
-                # Vérifier si le membre peut emprunter
-                if membre.statut != 'EN_REGLE':
-                    error_msg = f"Le membre {membre.numero_membre} n'est pas en règle (statut: {membre.statut})"
-                    print(f"❌ ERREUR MEMBRE: {error_msg}")
+                print(f"   - Actif: {membre.is_actif}")
+
+                # ✅ NOUVEAU : Tous les membres actifs peuvent emprunter
+                if not membre.is_actif:
+                    error_msg = f"Le membre {membre.numero_membre} est inactif"
+                    print(f"❌ ERREUR MEMBRE INACTIF: {error_msg}")
                     return Response({
-                        'error': 'Membre non éligible',
-                        'details': error_msg,
-                        'membre_statut': membre.statut
+                        'error': 'Membre inactif',
+                        'details': error_msg
                     }, status=status.HTTP_400_BAD_REQUEST)
-                
+
                 # Vérifier s'il a déjà un emprunt en cours
                 emprunt_en_cours = Emprunt.objects.filter(
-                    membre=membre, 
+                    membre=membre,
                     statut__in=['EN_COURS', 'EN_RETARD']
                 ).exists()
-                
+
                 if emprunt_en_cours:
                     error_msg = f"Le membre {membre.numero_membre} a déjà un emprunt en cours"
                     print(f"❌ ERREUR EMPRUNT EN COURS: {error_msg}")
@@ -1268,3 +1269,615 @@ class PaiementRenflouementViewSet(viewsets.ModelViewSet):
                 'details': str(e),
                 'type': str(type(e))
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class PenaliteEmpruntFilter(filters.FilterSet):
+    """
+    Filtres pour les pénalités d'emprunt
+    """
+    # Filtres par emprunt
+    emprunt = filters.UUIDFilter()
+    membre_numero = filters.CharFilter(field_name='emprunt__membre__numero_membre', lookup_expr='icontains')
+    membre_nom = filters.CharFilter(method='filter_membre_nom')
+    
+    # Filtres par type et palier
+    type_penalite = filters.ChoiceFilter(choices=PenaliteEmprunt.TYPE_PENALITE_CHOICES)
+    palier = filters.CharFilter(lookup_expr='icontains')
+    sessions_ecoulees = filters.NumberFilter()
+    sessions_ecoulees_min = filters.NumberFilter(field_name='sessions_ecoulees', lookup_expr='gte')
+    sessions_ecoulees_max = filters.NumberFilter(field_name='sessions_ecoulees', lookup_expr='lte')
+    
+    # Filtres par montant
+    montant_min = filters.NumberFilter(field_name='montant_total_penalite', lookup_expr='gte')
+    montant_max = filters.NumberFilter(field_name='montant_total_penalite', lookup_expr='lte')
+    
+    # Filtres par date
+    date_application = filters.DateFilter()
+    date_application_after = filters.DateFilter(field_name='date_application', lookup_expr='gte')
+    date_application_before = filters.DateFilter(field_name='date_application', lookup_expr='lte')
+    
+    # Filtres par session
+    session_application = filters.UUIDFilter()
+    
+    # Filtres par qui a appliqué
+    appliquee_par = filters.UUIDFilter()
+    automatique = filters.BooleanFilter(method='filter_automatique')
+    
+    # Filtres temporels rapides
+    this_month = filters.BooleanFilter(method='filter_this_month')
+    this_year = filters.BooleanFilter(method='filter_this_year')
+    
+    class Meta:
+        model = PenaliteEmprunt
+        fields = [
+            'emprunt', 'type_penalite', 'palier', 'sessions_ecoulees',
+            'session_application', 'appliquee_par'
+        ]
+    
+    def filter_membre_nom(self, queryset, name, value):
+        """Filtre par nom du membre"""
+        return queryset.filter(
+            Q(emprunt__membre__utilisateur__first_name__icontains=value) |
+            Q(emprunt__membre__utilisateur__last_name__icontains=value)
+        )
+    
+    def filter_automatique(self, queryset, name, value):
+        """Filtre les pénalités automatiques (appliquee_par = NULL)"""
+        if value:
+            return queryset.filter(appliquee_par__isnull=True)
+        else:
+            return queryset.filter(appliquee_par__isnull=False)
+    
+    def filter_this_month(self, queryset, name, value):
+        """Filtre les pénalités de ce mois"""
+        if value:
+            from django.utils import timezone
+            now = timezone.now()
+            return queryset.filter(
+                date_application__year=now.year,
+                date_application__month=now.month
+            )
+        return queryset
+    
+    def filter_this_year(self, queryset, name, value):
+        """Filtre les pénalités de cette année"""
+        if value:
+            from django.utils import timezone
+            now = timezone.now()
+            return queryset.filter(date_application__year=now.year)
+        return queryset
+
+
+class PenaliteEmpruntViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet pour les pénalités d'emprunt - Transparence totale
+    """
+    queryset = PenaliteEmprunt.objects.all()
+    serializer_class = PenaliteEmpruntSerializer
+    permission_classes = [IsAdminOrReadOnly]
+    filterset_class = PenaliteEmpruntFilter
+    ordering = ['-date_application']
+    
+    def get_queryset(self):
+        """Optimisation des requêtes avec select_related"""
+        return PenaliteEmprunt.objects.select_related(
+            'emprunt__membre__utilisateur',
+            'session_application',
+            'appliquee_par'
+        ).prefetch_related(
+            'emprunt__remboursements'
+        )
+    
+    @action(detail=False, methods=['get'])
+    def statistiques(self, request):
+        """
+        Statistiques globales des pénalités
+        """
+        queryset = self.filter_queryset(self.get_queryset())
+        
+        # Statistiques générales
+        total_penalites = queryset.count()
+        montant_total = queryset.aggregate(
+            total=Sum('montant_total_penalite')
+        )['total'] or Decimal('0')
+        
+        # Par type
+        stats_par_type = {}
+        for type_code, type_label in PenaliteEmprunt.TYPE_PENALITE_CHOICES:
+            type_queryset = queryset.filter(type_penalite=type_code)
+            stats_par_type[type_code] = {
+                'label': type_label,
+                'count': type_queryset.count(),
+                'montant_total': type_queryset.aggregate(
+                    total=Sum('montant_total_penalite')
+                )['total'] or Decimal('0')
+            }
+        
+        # Par palier
+        stats_par_palier = queryset.values('palier').annotate(
+            count=models.Count('id'),
+            montant_total=Sum('montant_total_penalite')
+        ).order_by('palier')
+        
+        # Top membres avec le plus de pénalités
+        top_membres_penalites = queryset.values(
+            'emprunt__membre__numero_membre',
+            'emprunt__membre__utilisateur__first_name',
+            'emprunt__membre__utilisateur__last_name'
+        ).annotate(
+            count=models.Count('id'),
+            montant_total=Sum('montant_total_penalite')
+        ).order_by('-montant_total')[:10]
+        
+        # Évolution mensuelle
+        from django.db.models.functions import TruncMonth
+        evolution_mensuelle = queryset.annotate(
+            mois=TruncMonth('date_application')
+        ).values('mois').annotate(
+            count=models.Count('id'),
+            montant_total=Sum('montant_total_penalite')
+        ).order_by('mois')
+        
+        return Response({
+            'total_penalites': total_penalites,
+            'montant_total': montant_total,
+            'stats_par_type': stats_par_type,
+            'stats_par_palier': list(stats_par_palier),
+            'top_membres_penalites': list(top_membres_penalites),
+            'evolution_mensuelle': list(evolution_mensuelle)
+        })
+    
+    @action(detail=False, methods=['get'])
+    def par_emprunt(self, request):
+        """
+        Liste des pénalités groupées par emprunt
+        """
+        emprunt_id = request.query_params.get('emprunt_id')
+        if not emprunt_id:
+            return Response({
+                'error': 'Paramètre emprunt_id requis'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            emprunt = Emprunt.objects.get(id=emprunt_id)
+        except Emprunt.DoesNotExist:
+            return Response({
+                'error': 'Emprunt non trouvé'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        penalites = self.get_queryset().filter(emprunt=emprunt)
+        serializer = self.get_serializer(penalites, many=True)
+        
+        # Informations résumées sur l'emprunt
+        emprunt_info = {
+            'id': str(emprunt.id),
+            'membre': {
+                'numero': emprunt.membre.numero_membre,
+                'nom': emprunt.membre.utilisateur.nom_complet
+            },
+            'montant_initial': emprunt.montant_emprunte,
+            'montant_total_actuel': emprunt.montant_total_a_rembourser,
+            'montant_rembourse': emprunt.montant_rembourse,
+            'statut': emprunt.statut,
+            'date_emprunt': emprunt.date_emprunt,
+            'nombre_penalites': penalites.count(),
+            'total_penalites': sum(p.montant_total_penalite for p in penalites)
+        }
+        
+        return Response({
+            'emprunt_info': emprunt_info,
+            'penalites': serializer.data
+        })
+
+
+class EmpruntDetailViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet en lecture seule pour le suivi détaillé des emprunts avec pénalités
+    Utilisé pour la transparence devant les membres
+    """
+    queryset = Emprunt.objects.all()
+    serializer_class = EmpruntDetailAvecPenalitesSerializer
+    permission_classes = [AllowAny]  # Accessible à tous pour transparence
+    
+    def get_queryset(self):
+        """Optimisation des requêtes"""
+        return Emprunt.objects.select_related(
+            'membre__utilisateur',
+            'session_emprunt'
+        ).prefetch_related(
+            'penalites__session_application',
+            'penalites__appliquee_par',
+            'remboursements'
+        )
+    
+    @action(detail=True, methods=['get'])
+    def historique_complet(self, request, pk=None):
+        """
+        Historique complet d'un emprunt : création, pénalités, remboursements
+        Parfait pour justifier devant les membres
+        """
+        emprunt = self.get_object()
+        
+        # Événements chronologiques
+        evenements = []
+        
+        # 1. Création de l'emprunt
+        evenements.append({
+            'type': 'creation',
+            'date': emprunt.date_emprunt,
+            'description': f"Création de l'emprunt de {emprunt.montant_emprunte:,.0f} FCFA",
+            'montant': emprunt.montant_emprunte,
+            'montant_total_apres': emprunt.montant_emprunte,  # Montant initial
+            'details': {
+                'taux_interet': emprunt.taux_interet,
+                'echeance': emprunt.date_remboursement_max
+            }
+        })
+        
+        # 2. Pénalités appliquées
+        for penalite in emprunt.penalites.all().order_by('date_application'):
+            evenements.append({
+                'type': 'penalite',
+                'date': penalite.date_application,
+                'description': f"Pénalité {penalite.palier} appliquée",
+                'montant': penalite.montant_total_penalite,
+                'montant_total_apres': None,  # Sera calculé après tri
+                'details': {
+                    'palier': penalite.palier,
+                    'sessions_ecoulees': penalite.sessions_ecoulees,
+                    'montant_reste_avant': penalite.montant_reste_avant,
+                    'taux_applique': penalite.taux_applique,
+                    'montant_interet_taux': penalite.montant_interet_taux,
+                    'montant_penalite_fixe': penalite.montant_penalite_fixe,
+                    'formule': penalite.formule_calcul,
+                    'justification': penalite.justification
+                }
+            })
+        
+        # 3. Remboursements effectués
+        for remboursement in emprunt.remboursements.all().order_by('date_remboursement'):
+            evenements.append({
+                'type': 'remboursement',
+                'date': remboursement.date_remboursement,
+                'description': f"Remboursement de {remboursement.montant:,.0f} FCFA",
+                'montant': -remboursement.montant,  # Négatif car c'est un remboursement
+                'montant_total_apres': None,  # Sera calculé après tri
+                'details': {
+                    'notes': remboursement.notes
+                }
+            })
+        
+        # Tri chronologique
+        evenements.sort(key=lambda x: x['date'])
+        
+        # Calcul des montants cumulés
+        montant_total_courant = Decimal('0')
+        for event in evenements:
+            if event['type'] == 'creation':
+                montant_total_courant = event['montant']
+            else:
+                montant_total_courant += event['montant']
+            event['montant_total_apres'] = montant_total_courant
+        
+        # Informations actuelles
+        info_actuelle = {
+            'montant_total_a_rembourser': emprunt.montant_total_a_rembourser,
+            'montant_rembourse': emprunt.montant_rembourse,
+            'montant_restant': emprunt.montant_restant_a_rembourser,
+            'statut': emprunt.statut,
+            'pourcentage_rembourse': emprunt.pourcentage_rembourse,
+            'is_en_retard': emprunt.is_en_retard,
+            'jours_de_retard': emprunt.jours_de_retard if emprunt.is_en_retard else 0
+        }
+        
+        return Response({
+            'emprunt_id': str(emprunt.id),
+            'membre': {
+                'numero': emprunt.membre.numero_membre,
+                'nom': emprunt.membre.utilisateur.nom_complet
+            },
+            'historique_chronologique': evenements,
+            'situation_actuelle': info_actuelle,
+            'resume': {
+                'nombre_penalites': emprunt.penalites.count(),
+                'total_penalites': sum(p.montant_total_penalite for p in emprunt.penalites.all()),
+                'nombre_remboursements': emprunt.remboursements.count(),
+                'total_rembourse': emprunt.montant_rembourse
+            }
+        })
+
+class RepartitionRenflouementExerciceViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet pour les répartitions de renflouement de fin d'exercice
+    """
+    queryset = RepartitionRenflouementExercice.objects.all()
+    serializer_class = RepartitionRenflouementExerciceSerializer
+    permission_classes = [IsAdminOrReadOnly]
+    ordering = ['-date_calcul']
+    
+    def get_queryset(self):
+        """Optimisation des requêtes"""
+        return RepartitionRenflouementExercice.objects.select_related(
+            'exercice', 'calcule_par'
+        )
+    
+    @action(detail=False, methods=['post'])
+    def calculer_renflouements(self, request):
+        """
+        Endpoint pour calculer et créer les renflouements de fin d'exercice
+        """
+        exercice_id = request.data.get('exercice_id')
+        if not exercice_id:
+            return Response({
+                'error': 'exercice_id requis'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            from core.models import Exercice
+            exercice = Exercice.objects.get(id=exercice_id)
+        except Exercice.DoesNotExist:
+            return Response({
+                'error': 'Exercice non trouvé'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Vérifier si une répartition existe déjà
+        if hasattr(exercice, 'repartition_renflouement'):
+            return Response({
+                'error': 'Une répartition existe déjà pour cet exercice',
+                'repartition_existante': RepartitionRenflouementExerciceSerializer(
+                    exercice.repartition_renflouement
+                ).data
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            # Lancer le calcul
+            result = exercice.creer_renflouements_fin_exercice()
+            
+            # Récupérer la répartition créée
+            repartition = exercice.repartition_renflouement
+            repartition.calcule_par = request.user
+            repartition.save()
+            
+            return Response({
+                'message': 'Renflouements proportionnels créés avec succès',
+                'result': result,
+                'repartition': RepartitionRenflouementExerciceSerializer(repartition).data
+            }, status=status.HTTP_201_CREATED)
+            
+        except Exception as e:
+            return Response({
+                'error': f'Erreur lors du calcul: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=True, methods=['get'])
+    def renflouements_associes(self, request, pk=None):
+        """
+        Liste des renflouements créés pour cette répartition
+        """
+        repartition = self.get_object()
+        
+        renflouements = Renflouement.objects.filter(
+            exercice_renflouement=repartition.exercice,
+            type_cause='RENFLOUEMENT_FIN_EXERCICE'
+        ).select_related('membre__utilisateur', 'session')
+        
+        # Statistiques
+        stats = {
+            'total_renflouements': renflouements.count(),
+            'total_du': sum(r.montant_du for r in renflouements),
+            'total_paye': sum(r.montant_paye for r in renflouements),
+            'nombre_soldes': renflouements.filter(montant_paye__gte=models.F('montant_du')).count(),
+            'nombre_partiels': renflouements.filter(
+                montant_paye__gt=0, montant_paye__lt=models.F('montant_du')
+            ).count(),
+            'nombre_non_payes': renflouements.filter(montant_paye=0).count()
+        }
+        
+        return Response({
+            'repartition': RepartitionRenflouementExerciceSerializer(repartition).data,
+            'statistiques': stats,
+            'renflouements': RenflouementSerializer(renflouements, many=True).data
+        })
+
+
+class RenflouementProportionnelViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet spécialisé pour les renflouements avec système proportionnel
+    """
+    queryset = Renflouement.objects.all()
+    serializer_class = RenflouementSerializer
+    permission_classes = [IsAdminOrReadOnly]
+    ordering = ['-date_creation']
+    
+    def get_queryset(self):
+        """Optimisation des requêtes"""
+        return Renflouement.objects.select_related(
+            'membre__utilisateur', 'session', 'exercice_renflouement'
+        ).prefetch_related('paiements')
+    
+    @action(detail=False, methods=['get'])
+    def proportionnels(self, request):
+        """
+        Liste des renflouements utilisant le système proportionnel
+        """
+        renflouements = self.get_queryset().filter(
+            ratio_caisse_inscription__isnull=False,
+            ratio_fonds_social__isnull=False
+        )
+        
+        serializer = self.get_serializer(renflouements, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def anciens(self, request):
+        """
+        Liste des renflouements utilisant l'ancien système (100% fonds social)
+        """
+        renflouements = self.get_queryset().filter(
+            ratio_caisse_inscription__isnull=True,
+            ratio_fonds_social__isnull=True
+        )
+        
+        serializer = self.get_serializer(renflouements, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['get'])
+    def simulation_paiement(self, request, pk=None):
+        """
+        Simule la répartition d'un paiement pour ce renflouement
+        """
+        renflouement = self.get_object()
+        montant = request.query_params.get('montant')
+        
+        if not montant:
+            return Response({
+                'error': 'Paramètre montant requis'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            montant = Decimal(montant)
+            if montant <= 0:
+                raise ValueError("Montant doit être positif")
+        except (ValueError, InvalidOperation):
+            return Response({
+                'error': 'Montant invalide'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Calculer la répartition
+        repartition = renflouement.calculer_repartition_paiement(montant)
+        
+        return Response({
+            'renflouement_id': str(renflouement.id),
+            'membre': renflouement.membre.numero_membre,
+            'montant_simule': montant,
+            'repartition': repartition,
+            'detail': {
+                'caisse_inscription': f"{repartition['caisse_inscription']:,.0f} FCFA ({renflouement.ratio_caisse_inscription or 0}%)",
+                'fonds_social': f"{repartition['fonds_social']:,.0f} FCFA ({renflouement.ratio_fonds_social or 100}%)",
+                'total': f"{repartition['total']:,.0f} FCFA"
+            },
+            'montant_restant_apres': max(0, renflouement.montant_restant - montant)
+        })
+    
+    @action(detail=False, methods=['get'])
+    def statistiques_proportionnelles(self, request):
+        """
+        Statistiques sur les renflouements proportionnels
+        """
+        # Renflouements proportionnels
+        proportionnels = self.get_queryset().filter(
+            ratio_caisse_inscription__isnull=False
+        )
+        
+        # Renflouements anciens
+        anciens = self.get_queryset().filter(
+            ratio_caisse_inscription__isnull=True
+        )
+        
+        # Paiements avec répartition
+        paiements_proportionnels = PaiementRenflouement.objects.filter(
+            ratio_caisse_utilise__isnull=False
+        )
+        
+        # Calculs
+        stats_proportionnels = {
+            'count': proportionnels.count(),
+            'montant_total_du': sum(r.montant_du for r in proportionnels),
+            'montant_total_paye': sum(r.montant_paye for r in proportionnels),
+        }
+        
+        stats_anciens = {
+            'count': anciens.count(),
+            'montant_total_du': sum(r.montant_du for r in anciens),
+            'montant_total_paye': sum(r.montant_paye for r in anciens),
+        }
+        
+        # Répartition des paiements proportionnels
+        total_caisse = paiements_proportionnels.aggregate(
+            total=Sum('montant_caisse_inscription')
+        )['total'] or Decimal('0')
+        
+        total_fonds = paiements_proportionnels.aggregate(
+            total=Sum('montant_fonds_social')
+        )['total'] or Decimal('0')
+        
+        return Response({
+            'renflouements_proportionnels': stats_proportionnels,
+            'renflouements_anciens': stats_anciens,
+            'paiements_proportionnels': {
+                'count': paiements_proportionnels.count(),
+                'total_vers_caisse_inscription': total_caisse,
+                'total_vers_fonds_social': total_fonds,
+                'total_global': total_caisse + total_fonds
+            },
+            'exercices_avec_repartition': RepartitionRenflouementExercice.objects.count()
+        })
+
+
+class PaiementRenflouementProportionnelViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet pour les paiements de renflouement avec traçabilité proportionnelle
+    """
+    queryset = PaiementRenflouement.objects.all()
+    serializer_class = PaiementRenflouementSerializer
+    permission_classes = [IsAdminOrReadOnly]
+    ordering = ['-date_paiement']
+    
+    def get_queryset(self):
+        """Optimisation des requêtes"""
+        return PaiementRenflouement.objects.select_related(
+            'renflouement__membre__utilisateur',
+            'renflouement__exercice_renflouement',
+            'session'
+        )
+    
+    @action(detail=False, methods=['get'])
+    def avec_repartition(self, request):
+        """
+        Liste des paiements avec répartition proportionnelle
+        """
+        paiements = self.get_queryset().filter(
+            ratio_caisse_utilise__isnull=False
+        )
+        
+        serializer = self.get_serializer(paiements, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def par_exercice(self, request):
+        """
+        Paiements groupés par exercice de renflouement
+        """
+        exercice_id = request.query_params.get('exercice_id')
+        if not exercice_id:
+            return Response({
+                'error': 'Paramètre exercice_id requis'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        paiements = self.get_queryset().filter(
+            renflouement__exercice_renflouement_id=exercice_id
+        )
+        
+        # Statistiques par exercice
+        stats = {
+            'total_paiements': paiements.count(),
+            'montant_total': paiements.aggregate(total=Sum('montant'))['total'] or Decimal('0'),
+            'total_caisse_inscription': paiements.aggregate(
+                total=Sum('montant_caisse_inscription')
+            )['total'] or Decimal('0'),
+            'total_fonds_social': paiements.aggregate(
+                total=Sum('montant_fonds_social')
+            )['total'] or Decimal('0'),
+            'paiements_proportionnels': paiements.filter(
+                ratio_caisse_utilise__isnull=False
+            ).count(),
+            'paiements_anciens': paiements.filter(
+                ratio_caisse_utilise__isnull=True
+            ).count()
+        }
+        
+        return Response({
+            'exercice_id': exercice_id,
+            'statistiques': stats,
+            'paiements': self.get_serializer(paiements, many=True).data
+        })

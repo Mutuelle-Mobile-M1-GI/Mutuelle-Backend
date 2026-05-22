@@ -4,7 +4,7 @@ from django.db import models
 from .models import (
     PaiementInscription, PaiementSolidarite, EpargneTransaction,
     Emprunt, Remboursement, AssistanceAccordee, Renflouement,
-    PaiementRenflouement
+    PaiementRenflouement, PenaliteEmprunt, RepartitionRenflouementExercice
 )
 from core.models import DépenseExercice, ConfigurationMutuelle
 from core.serializers import MembreSimpleSerializer, SessionSerializer, TypeAssistanceSerializer
@@ -348,7 +348,6 @@ class RenflouementSerializer(serializers.ModelSerializer):
     def get_paiements_details(self, obj):
         paiements = obj.paiements.all()
         return PaiementRenflouementSerializer(paiements, many=True).data
-
 class PaiementRenflouementSerializer(serializers.ModelSerializer):
     """
     Serializer pour les paiements de renflouement
@@ -404,3 +403,256 @@ class DépenseExerciceSerializer(serializers.ModelSerializer):
             'beneficiaire_info', 'date_creation'
         ]
         read_only_fields = ['id', 'date_creation']
+
+
+class PenaliteEmpruntSerializer(serializers.ModelSerializer):
+    """
+    Serializer pour les pénalités d'emprunt - Transparence totale
+    """
+    # Informations sur l'emprunt et le membre
+    emprunt_info = serializers.SerializerMethodField()
+    membre_numero = serializers.CharField(source='emprunt.membre.numero_membre', read_only=True)
+    membre_nom = serializers.CharField(source='emprunt.membre.utilisateur.nom_complet', read_only=True)
+    
+    # Informations sur la session
+    session_info = SessionSerializer(source='session_application', read_only=True)
+    
+    # Informations sur qui a appliqué la pénalité
+    appliquee_par_nom = serializers.CharField(source='appliquee_par.nom_complet', read_only=True, allow_null=True)
+    
+    # Formule de calcul pour affichage
+    formule_calcul = serializers.ReadOnlyField()
+    
+    # Champs calculés pour l'affichage
+    type_penalite_display = serializers.CharField(source='get_type_penalite_display', read_only=True)
+    
+    class Meta:
+        model = PenaliteEmprunt
+        fields = [
+            'id', 'emprunt', 'emprunt_info', 'membre_numero', 'membre_nom',
+            'type_penalite', 'type_penalite_display', 'palier', 'sessions_ecoulees',
+            'montant_reste_avant', 'taux_applique', 'montant_interet_taux',
+            'montant_penalite_fixe', 'montant_total_penalite', 'formule_calcul',
+            'date_application', 'appliquee_par', 'appliquee_par_nom',
+            'session_application', 'session_info', 'justification', 'notes_complementaires'
+        ]
+        read_only_fields = [
+            'id', 'montant_total_penalite', 'formule_calcul', 'date_application',
+            'emprunt_info', 'membre_numero', 'membre_nom', 'type_penalite_display',
+            'appliquee_par_nom', 'session_info'
+        ]
+    
+    def get_emprunt_info(self, obj):
+        """Informations résumées sur l'emprunt"""
+        return {
+            'id': str(obj.emprunt.id),
+            'montant_initial': obj.emprunt.montant_emprunte,
+            'montant_total_actuel': obj.emprunt.montant_total_a_rembourser,
+            'montant_rembourse': obj.emprunt.montant_rembourse,
+            'montant_restant': obj.emprunt.montant_restant_a_rembourser,
+            'statut': obj.emprunt.statut,
+            'date_emprunt': obj.emprunt.date_emprunt,
+            'date_echeance': obj.emprunt.date_remboursement_max,
+            'jours_retard': obj.emprunt.jours_de_retard if obj.emprunt.is_en_retard else 0
+        }
+
+
+class RepartitionRenflouementExerciceSerializer(serializers.ModelSerializer):
+    """
+    Serializer pour les répartitions de renflouement de fin d'exercice
+    """
+    exercice_nom = serializers.CharField(source='exercice.nom', read_only=True)
+    calcule_par_nom = serializers.CharField(source='calcule_par.nom_complet', read_only=True, allow_null=True)
+    
+    # Propriétés calculées
+    formule_calcul = serializers.ReadOnlyField()
+    detail_ratios = serializers.ReadOnlyField()
+    
+    class Meta:
+        model = RepartitionRenflouementExercice
+        fields = [
+            'id', 'exercice', 'exercice_nom',
+            'total_sorties_caisse_inscription', 'total_sorties_fonds_social', 'total_sorties_global',
+            'ratio_caisse_inscription', 'ratio_fonds_social',
+            'nombre_membres_en_regle', 'nombre_membres_non_en_regle', 'nombre_membres_total',
+            'montant_par_membre', 'formule_calcul', 'detail_ratios',
+            'date_calcul', 'calcule_par', 'calcule_par_nom', 'notes_calcul'
+        ]
+        read_only_fields = [
+            'id', 'date_calcul', 'exercice_nom', 'calcule_par_nom', 
+            'formule_calcul', 'detail_ratios'
+        ]
+
+
+class RenflouementSerializer(serializers.ModelSerializer):
+    """
+    Serializer pour les renflouements avec support du système proportionnel
+    """
+    membre_info = MembreSimpleSerializer(source='membre', read_only=True)
+    session_info = SessionSerializer(source='session', read_only=True)
+    exercice_nom = serializers.CharField(source='exercice_renflouement.nom', read_only=True, allow_null=True)
+    
+    # Propriétés calculées
+    montant_restant = serializers.ReadOnlyField()
+    is_solde = serializers.ReadOnlyField()
+    pourcentage_paye = serializers.ReadOnlyField()
+    
+    # Détails des paiements
+    paiements_details = serializers.SerializerMethodField()
+    
+    # Informations sur la répartition proportionnelle
+    est_proportionnel = serializers.SerializerMethodField()
+    detail_repartition = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Renflouement
+        fields = [
+            'id', 'membre', 'membre_info', 'session', 'session_info',
+            'montant_du', 'montant_paye', 'montant_restant', 'is_solde', 'pourcentage_paye',
+            'cause', 'type_cause', 'exercice_renflouement', 'exercice_nom',
+            'ratio_caisse_inscription', 'ratio_fonds_social',
+            'est_proportionnel', 'detail_repartition',
+            'date_creation', 'date_derniere_modification',
+            'paiements_details'
+        ]
+        read_only_fields = [
+            'id', 'montant_restant', 'is_solde', 'pourcentage_paye',
+            'date_creation', 'date_derniere_modification',
+            'membre_info', 'session_info', 'exercice_nom',
+            'est_proportionnel', 'detail_repartition', 'paiements_details'
+        ]
+    
+    def get_est_proportionnel(self, obj):
+        """Indique si ce renflouement utilise le système proportionnel"""
+        return obj.ratio_caisse_inscription is not None and obj.ratio_fonds_social is not None
+    
+    def get_detail_repartition(self, obj):
+        """Détail de la répartition proportionnelle"""
+        if not self.get_est_proportionnel(obj):
+            return "Ancien système : 100% fonds social"
+        
+        return {
+            'caisse_inscription': f"{obj.ratio_caisse_inscription}%",
+            'fonds_social': f"{obj.ratio_fonds_social}%",
+            'description': f"{obj.ratio_caisse_inscription}% caisse inscription, {obj.ratio_fonds_social}% fonds social"
+        }
+    
+    def get_paiements_details(self, obj):
+        """Détails des paiements effectués"""
+        paiements = obj.paiements.all().order_by('-date_paiement')
+        return PaiementRenflouementSerializer(paiements, many=True).data
+
+
+class PaiementRenflouementSerializer(serializers.ModelSerializer):
+    """
+    Serializer pour les paiements de renflouement avec traçabilité de la répartition
+    """
+    renflouement_info = serializers.SerializerMethodField()
+    membre_numero = serializers.CharField(source='renflouement.membre.numero_membre', read_only=True)
+    membre_nom = serializers.CharField(source='renflouement.membre.utilisateur.nom_complet', read_only=True)
+    session_info = SessionSerializer(source='session', read_only=True)
+    
+    # Détail de la répartition
+    repartition_detail = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = PaiementRenflouement
+        fields = [
+            'id', 'renflouement', 'renflouement_info', 'membre_numero', 'membre_nom',
+            'montant', 'montant_caisse_inscription', 'montant_fonds_social',
+            'ratio_caisse_utilise', 'ratio_fonds_utilise', 'repartition_detail',
+            'session', 'session_info', 'date_paiement', 'notes'
+        ]
+        read_only_fields = [
+            'id', 'montant_caisse_inscription', 'montant_fonds_social',
+            'ratio_caisse_utilise', 'ratio_fonds_utilise',
+            'date_paiement', 'renflouement_info', 'membre_numero', 'membre_nom',
+            'session_info', 'repartition_detail'
+        ]
+    
+    def get_renflouement_info(self, obj):
+        """Informations résumées sur le renflouement"""
+        return {
+            'id': str(obj.renflouement.id),
+            'montant_du': obj.renflouement.montant_du,
+            'montant_paye': obj.renflouement.montant_paye,
+            'montant_restant': obj.renflouement.montant_restant,
+            'type_cause': obj.renflouement.type_cause,
+            'est_proportionnel': obj.ratio_caisse_utilise is not None
+        }
+    
+    def get_repartition_detail(self, obj):
+        """Détail de la répartition de ce paiement"""
+        if obj.ratio_caisse_utilise is None:
+            return {
+                'type': 'ancien_systeme',
+                'description': '100% fonds social',
+                'caisse_inscription': '0 FCFA (0%)',
+                'fonds_social': f'{obj.montant:,.0f} FCFA (100%)'
+            }
+        
+        return {
+            'type': 'proportionnel',
+            'description': f'{obj.ratio_caisse_utilise}% caisse inscription, {obj.ratio_fonds_utilise}% fonds social',
+            'caisse_inscription': f'{obj.montant_caisse_inscription:,.0f} FCFA ({obj.ratio_caisse_utilise}%)',
+            'fonds_social': f'{obj.montant_fonds_social:,.0f} FCFA ({obj.ratio_fonds_utilise}%)',
+            'formule': f'{obj.montant:,.0f} × {obj.ratio_caisse_utilise}% = {obj.montant_caisse_inscription:,.0f} | {obj.montant:,.0f} × {obj.ratio_fonds_utilise}% = {obj.montant_fonds_social:,.0f}'
+        }
+
+
+class EmpruntDetailAvecPenalitesSerializer(serializers.ModelSerializer):
+    """
+    Serializer détaillé pour un emprunt avec toutes ses pénalités
+    Utilisé pour le suivi transparent d'un emprunt
+    """
+    # Informations du membre
+    membre_info = MembreSimpleSerializer(source='membre', read_only=True)
+    
+    # Informations de session
+    session_info = SessionSerializer(source='session_emprunt', read_only=True)
+    
+    # Toutes les pénalités appliquées
+    penalites = PenaliteEmpruntSerializer(many=True, read_only=True)
+    
+    # Statistiques calculées
+    nombre_penalites = serializers.SerializerMethodField()
+    total_penalites = serializers.SerializerMethodField()
+    montant_initial_emprunte = serializers.DecimalField(max_digits=12, decimal_places=2, source='montant_emprunte', read_only=True)
+    
+    # Propriétés calculées existantes
+    montant_restant_a_rembourser = serializers.ReadOnlyField()
+    montant_interets = serializers.ReadOnlyField()
+    pourcentage_rembourse = serializers.ReadOnlyField()
+    is_en_retard = serializers.ReadOnlyField()
+    jours_de_retard = serializers.ReadOnlyField()
+    jours_restants = serializers.ReadOnlyField()
+    
+    # Détails des remboursements
+    remboursements_details = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Emprunt
+        fields = [
+            'id', 'membre_info', 'montant_initial_emprunte', 'montant_emprunte',
+            'taux_interet', 'montant_total_a_rembourser', 'montant_rembourse',
+            'montant_restant_a_rembourser', 'montant_interets', 'pourcentage_rembourse',
+            'session_info', 'date_emprunt', 'date_remboursement_max',
+            'statut', 'is_en_retard', 'jours_de_retard', 'jours_restants',
+            'notes', 'penalites', 'nombre_penalites', 'total_penalites',
+            'remboursements_details', 'date_creation', 'date_modification'
+        ]
+        read_only_fields = ['id', 'date_creation', 'date_modification']
+    
+    def get_nombre_penalites(self, obj):
+        """Nombre total de pénalités appliquées"""
+        return obj.penalites.count()
+    
+    def get_total_penalites(self, obj):
+        """Montant total des pénalités appliquées"""
+        return sum(p.montant_total_penalite for p in obj.penalites.all())
+    
+    def get_remboursements_details(self, obj):
+        """Détails des remboursements effectués"""
+        from .models import Remboursement
+        remboursements = Remboursement.objects.filter(emprunt=obj).order_by('-date_remboursement')
+        return RemboursementSerializer(remboursements, many=True).data

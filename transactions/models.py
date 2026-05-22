@@ -25,7 +25,7 @@ class Emprunt(models.Model):
         ('REMBOURSE', 'Remboursé'),
         ('EN_RETARD', 'En retard'),
     ]
-    
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     membre = models.ForeignKey(Membre, on_delete=models.CASCADE, related_name='emprunts')
     montant_emprunte = models.DecimalField(
@@ -54,6 +54,13 @@ class Emprunt(models.Model):
     )
     statut = models.CharField(max_length=15, choices=STATUS_CHOICES, default='EN_COURS', verbose_name="Statut")
     notes = models.TextField(blank=True, verbose_name="Notes")
+
+    # ✅ NOUVEAU : Snapshot des épargnes au moment de l'emprunt
+    epargnes_snapshot = models.JSONField(
+        default=dict, blank=True, null=True,
+        verbose_name="Épargnes snapshot à la création",
+        help_text="Enregistre les épargnes de chaque membre au moment de l'emprunt pour les redistributions futures"
+    )
     
     # Champs de suivi automatique
     date_creation = models.DateTimeField(auto_now_add=True, verbose_name="Date de création")
@@ -74,17 +81,21 @@ class Emprunt(models.Model):
     @property
     def montant_restant_a_rembourser(self):
         """Calcule le montant restant à rembourser"""
+        if not self.montant_total_a_rembourser:
+            return 0
         return max(0, self.montant_total_a_rembourser - self.montant_rembourse)
     
     @property
     def montant_interets(self):
         """Calcule le montant des intérêts"""
+        if not self.montant_total_a_rembourser:
+            return 0
         return self.montant_total_a_rembourser - self.montant_emprunte
     
     @property
     def pourcentage_rembourse(self):
         """Calcule le pourcentage remboursé"""
-        if self.montant_total_a_rembourser == 0:
+        if not self.montant_total_a_rembourser or self.montant_total_a_rembourser == 0:
             return 0
         return min(100, (self.montant_rembourse / self.montant_total_a_rembourser) * 100)
     
@@ -143,13 +154,19 @@ class Emprunt(models.Model):
             print(f"   ✅ Emprunt complètement remboursé -> {nouveau_statut}")
             return nouveau_statut
         
-        # Priorité 2: Vérifier si en retard
+        # Priorité 2: Maintenir le statut EN_RETARD si une pénalité a déjà été appliquée.
+        if self.statut == 'EN_RETARD' or (hasattr(self, 'penalites') and self.penalites.exists()):
+            nouveau_statut = 'EN_RETARD'
+            print(f"   ⚠️ Emprunt marqué en retard (pénalités existantes) -> {nouveau_statut}")
+            return nouveau_statut
+
+        # Priorité 3: Vérifier si en retard par date
         if self.is_en_retard:
             nouveau_statut = 'EN_RETARD'
             print(f"   ⚠️ Emprunt en retard de {self.jours_de_retard} jours -> {nouveau_statut}")
             return nouveau_statut
         
-        # Priorité 3: En cours par défaut
+        # Priorité 4: En cours par défaut
         nouveau_statut = 'EN_COURS'
         print(f"   🔄 Emprunt en cours normal -> {nouveau_statut}")
         return nouveau_statut
@@ -157,49 +174,157 @@ class Emprunt(models.Model):
     #redistribution des 15k de penalite
 
     def _redistribuer_penalite(self, montant_a_redistribuer, tag_palier):
-    
+        """
+        Redistribue la pénalité aux membres qui AVAIENT une épargne
+        au moment de la création de l'emprunt (utilise le snapshot)
+        """
         if montant_a_redistribuer <= 0:
             return
 
-        total_global = Decimal('0')
-        epargnes_membres = []
-
-        tous_membres = Membre.objects.filter(actif=True)
-        for m in tous_membres:
-            e = m.calculer_epargne_pure()
-            if e > 0:
-                total_global += e
-                epargnes_membres.append({'membre': m, 'montant': e})
-
-        if total_global <= 0:
-            print("⚠️ Aucune épargne globale trouvée, redistribution annulée.")
+        # ✅ UTILISER LE SNAPSHOT AU LIEU DE L'ÉPARGNE ACTUELLE
+        if not self.epargnes_snapshot:
+            print("⚠️ Aucun snapshot d'épargne trouvé. Annulation de la redistribution.")
             return
 
-        with transaction.atomic():
-            for item in epargnes_membres:
-                part = (item['montant'] / total_global) * montant_a_redistribuer
-                part = part.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        total_global = Decimal('0')
+        epargnes_snapshot_list = []
 
-                if part > 0:
-                    Interet.objects.create(
-                        membre=item['membre'],
-                        emprunt_source=self,
-                        exercice=self.session_emprunt.exercice,
-                        session=self.session_emprunt,
-                        montant=part
-                    )
-                    EpargneTransaction.objects.create(
-                        membre=item['membre'],
-                        type_transaction='AJOUT_INTERET',
-                        montant=part,
-                        session=self.session_emprunt,
-                        notes=(
-                            f"Pénalité retard {tag_palier} sur prêt de "
-                            f"{self.membre.numero_membre}: {part:,.0f} FCFA"
+        # Convertir le snapshot JSON en données exploitables
+        for membre_id_str, data in self.epargnes_snapshot.items():
+            try:
+                epargne = Decimal(data['epargne']) if isinstance(data['epargne'], str) else Decimal(data['epargne'])
+                if epargne > 0:
+                    total_global += epargne
+                    epargnes_snapshot_list.append({
+                        'membre_id': membre_id_str,
+                        'numero': data['numero'],
+                        'epargne': epargne
+                    })
+            except (ValueError, KeyError) as e:
+                print(f"⚠️ Erreur conversion snapshot: {e}")
+                continue
+
+        if total_global <= 0:
+            print("⚠️ Aucune épargne dans le snapshot trouvée, redistribution annulée.")
+            return
+
+        print(f"📊 Redistribution pénalité {tag_palier}: Total épargne snapshot = {total_global:,.0f} FCFA")
+
+        with transaction.atomic():
+            for item in epargnes_snapshot_list:
+                try:
+                    membre = Membre.objects.get(id=item['membre_id'])
+                    part = (item['epargne'] / total_global) * montant_a_redistribuer
+                    part = part.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+                    if part > 0:
+                        Interet.objects.create(
+                            membre=membre,
+                            emprunt_source=self,
+                            exercice=self.session_emprunt.exercice,
+                            session=self.session_emprunt,
+                            montant=part
                         )
-                    )
+                        EpargneTransaction.objects.create(
+                            membre=membre,
+                            type_transaction='AJOUT_INTERET',
+                            montant=part,
+                            session=self.session_emprunt,
+                            notes=(
+                                f"Pénalité retard {tag_palier} sur prêt de "
+                                f"{self.membre.numero_membre}: {part:,.0f} FCFA "
+                                f"(basé sur épargne snapshot: {item['epargne']:,.0f} FCFA)"
+                            )
+                        )
+                        print(f"   ✅ {item['numero']}: +{part:,.0f} FCFA (épargne snapshot: {item['epargne']:,.0f})")
+                except Membre.DoesNotExist:
+                    print(f"⚠️ Membre {item['numero']} introuvable (snapshot)")
+                    continue
 
         print(f"✅ Redistribution de {montant_a_redistribuer:,.0f} FCFA ({tag_palier}) terminée.")
+    
+    def _redistribuer_penalite_au_remboursement(self):
+        """
+        Redistribue la pénalité UNIQUEMENT quand l'emprunt est complètement remboursé.
+        Redistribue le total: montant_interet_taux + montant_penalite_fixe
+        """
+        # Vérifier s'il existe une pénalité
+        penalite = PenaliteEmprunt.objects.filter(emprunt=self).first()
+        
+        if not penalite:
+            print(f"✅ Pas de pénalité appliquée pour cet emprunt, rien à redistribuer.")
+            return
+        
+        # Calculer le total de la pénalité à redistribuer
+        montant_total_penalite = penalite.montant_interet_taux + penalite.montant_penalite_fixe
+        
+        if montant_total_penalite <= 0:
+            print(f"⚠️ Montant de pénalité = 0, rien à redistribuer.")
+            return
+        
+        print(f"🎯 Redistribution pénalité au remboursement: {montant_total_penalite:,.0f} FCFA")
+        
+        # Utiliser le snapshot pour la redistribution
+        if not self.epargnes_snapshot:
+            print("⚠️ Aucun snapshot d'épargne trouvé. Pas de redistribution.")
+            return
+        
+        total_global = Decimal('0')
+        epargnes_snapshot_list = []
+        
+        # Convertir le snapshot JSON en données exploitables
+        for membre_id_str, data in self.epargnes_snapshot.items():
+            try:
+                epargne = Decimal(data['epargne']) if isinstance(data['epargne'], str) else Decimal(data['epargne'])
+                if epargne > 0:
+                    total_global += epargne
+                    epargnes_snapshot_list.append({
+                        'membre_id': membre_id_str,
+                        'numero': data['numero'],
+                        'epargne': epargne
+                    })
+            except (ValueError, KeyError) as e:
+                print(f"⚠️ Erreur conversion snapshot: {e}")
+                continue
+        
+        if total_global <= 0:
+            print("⚠️ Aucune épargne dans le snapshot trouvée, redistribution annulée.")
+            return
+        
+        print(f"📊 Total épargne snapshot = {total_global:,.0f} FCFA")
+        
+        with transaction.atomic():
+            for item in epargnes_snapshot_list:
+                try:
+                    membre = Membre.objects.get(id=item['membre_id'])
+                    part = (item['epargne'] / total_global) * montant_total_penalite
+                    part = part.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+                    
+                    if part > 0:
+                        Interet.objects.create(
+                            membre=membre,
+                            emprunt_source=self,
+                            exercice=self.session_emprunt.exercice,
+                            session=self.session_emprunt,
+                            montant=part
+                        )
+                        EpargneTransaction.objects.create(
+                            membre=membre,
+                            type_transaction='AJOUT_INTERET',
+                            montant=part,
+                            session=self.session_emprunt,
+                            notes=(
+                                f"Pénalité retard redistribuée au remboursement sur prêt de "
+                                f"{self.membre.numero_membre}: {part:,.0f} FCFA "
+                                f"(basé sur épargne snapshot: {item['epargne']:,.0f} FCFA)"
+                            )
+                        )
+                        print(f"   ✅ {item['numero']}: +{part:,.0f} FCFA (épargne snapshot: {item['epargne']:,.0f})")
+                except Membre.DoesNotExist:
+                    print(f"⚠️ Membre {item['numero']} introuvable (snapshot)")
+                    continue
+        
+        print(f"✅ Redistribution pénalité au remboursement ({montant_total_penalite:,.0f} FCFA) terminée.")
     
     #recalcul des pourcentages apres chaque 3 sessions
     def capitaliser_interets_retard(self):
@@ -218,10 +343,10 @@ class Emprunt(models.Model):
         # 2. Condition Modulo 3 (Tous les 3, 6, 9... mois)
         if sessions_passees > 0 and sessions_passees % 3 == 0 and self.statut != 'REMBOURSE':
             
-            # SECURITÉ : On vérifie si ce palier précis a déjà été appliqué
-            # Exemple : "Palier 3", "Palier 6", etc.
+            # SECURITÉ : Vérifier si ce palier précis a déjà été appliqué
             tag_palier = f"Palier-{sessions_passees}"
-            if tag_palier in (self.notes or ""):
+            
+            if PenaliteEmprunt.objects.filter(emprunt=self, palier=tag_palier).exists():
                 print(f"⏭️ Palier {sessions_passees} déjà facturé. Repos.")
                 return False
 
@@ -234,27 +359,45 @@ class Emprunt(models.Model):
             reste = self.montant_total_a_rembourser - self.montant_rembourse
             
             if reste > 0:
-                
                 PENALITE_FIXE = Decimal('15000')
                 penalite_taux = reste * taux
                 penalite_totale = penalite_taux + PENALITE_FIXE
 
+                # ✅ NOUVEAU: Créer l'enregistrement de pénalité AVANT de modifier l'emprunt
+                session_actuelle = Session.objects.filter(statut='EN_COURS').first()
+                if not session_actuelle:
+                    print("⚠️ Aucune session en cours pour enregistrer la pénalité")
+                    return False
+
+                penalite_record = PenaliteEmprunt.objects.create(
+                    emprunt=self,
+                    type_penalite='RETARD_PALIER',
+                    palier=f"Palier-{sessions_passees}",
+                    sessions_ecoulees=sessions_passees,
+                    montant_reste_avant=reste,
+                    taux_applique=config.taux_interet,
+                    montant_interet_taux=penalite_taux,
+                    montant_penalite_fixe=PENALITE_FIXE,
+                    session_application=session_actuelle,
+                    # appliquee_par sera NULL pour les pénalités automatiques
+                )
+
+                # Mise à jour de l'emprunt
                 self.montant_total_a_rembourser += penalite_totale
                 self.statut = 'EN_RETARD'
 
+                # ✅ Ajouter une note pour l'historique
                 date_str = datetime.datetime.now().strftime("%d/%m/%Y")
-                note_entree = (
-                    f"\n[{date_str}] Pénalité retard ({tag_palier}): "
-                    f"+{penalite_taux:,.0f} FCFA (intérêt taux) "
-                    f"+ {PENALITE_FIXE:,.0f} FCFA (pénalité fixe) "
-                    f"= +{penalite_totale:,.0f} FCFA total"
-                )
+                note_entree = f"\n[{date_str}] Pénalité appliquée: +{penalite_totale:,.0f} FCFA (voir détails pénalité ID: {penalite_record.id})"
                 self.notes = (self.notes or "") + note_entree
 
-                self.save()
-                self._redistribuer_penalite(penalite_totale, tag_palier)
+                # Enregistrer directement pour éviter de réévaluer le statut
+                super(Emprunt, self).save()
+                # ⚠️ NE PAS redistribuer ici - on redistribuera seulement à REMBOURSE
 
-                print(f"💰 SUCCÈS : +{penalite_totale:,.0f} FCFA ajoutés (Cycle {sessions_passees}/3)")
+                print(f"💰 SUCCÈS : +{penalite_totale:,.0f} FCFA ajoutés")
+                print(f"📋 Pénalité enregistrée avec ID: {penalite_record.id}")
+                print(f"⏳ Redistribution = lors du remboursement complet")
                 return True
         return False
     
@@ -298,7 +441,22 @@ class Emprunt(models.Model):
             
             # 🔧 ÉTAPE 5: Détermination du statut (EN_COURS, REMBOURSE, etc.)
             self.statut = self._determiner_statut_auto()
-            
+
+            # ✅ ÉTAPE 5bis: Enregistrement snapshot des épargnes (NOUVEAU)
+            if is_new and not self.epargnes_snapshot:
+                print(f"   📸 Enregistrement snapshot des épargnes...")
+                from core.models import Membre  # Import local pour éviter les conflits
+                self.epargnes_snapshot = {}
+                tous_membres = Membre.objects.filter(actif=True).exclude(id=self.membre.id)
+                for m in tous_membres:
+                    epargne = m.calculer_epargne_pure()
+                    if epargne > 0:
+                        self.epargnes_snapshot[str(m.id)] = {
+                            'numero': m.numero_membre,
+                            'epargne': str(epargne)
+                        }
+                        print(f"     - {m.numero_membre}: {epargne:,.0f} FCFA")
+
             # 🔧 ÉTAPE 6: Validations de sécurité
             if self.montant_emprunte <= 0:
                 raise ValueError(f"Montant décaissé invalide: {self.montant_emprunte}")
@@ -307,7 +465,13 @@ class Emprunt(models.Model):
             print(f"   💾 Sauvegarde en base de données...")
             super().save(*args, **kwargs)
             
-            # 🚀 ÉTAPE 8: Redistribution des intérêts (Seulement à la création)
+            # � ÉTAPE 7bis: Redistribution pénalité au remboursement (NOUVEAU)
+            # Si le statut passe à REMBOURSE, on redistribue la pénalité
+            if self.statut == 'REMBOURSE':
+                print(f"   🎯 Emprunt complètement remboursé → Redistribution pénalité...")
+                self._redistribuer_penalite_au_remboursement()
+            
+            # �🚀 ÉTAPE 8: Redistribution des intérêts (Seulement à la création)
             if is_new:
                 print(f"   💰 Lancement de la redistribution des intérêts...")
                 self.distribuer_interets_precomptes()
@@ -635,14 +799,14 @@ class AssistanceAccordee(models.Model):
                     session=self.session,
                     beneficiaire=self.membre
                 )
-                print(f"   📋 Dépense enregistrée: {self.montant:,.0f} FCFA")
+                print(f"   Dépense enregistrée: {self.montant:,.0f} FCFA")
             else:
-                print("⚠️  Aucun exercice EN_COURS pour enregistrer la dépense")
+                print("  Aucun exercice EN_COURS pour enregistrer la dépense")
         except Exception as e:
-            print(f"⚠️  Erreur lors de l'enregistrement de la dépense: {e}")
+            print(f"Erreur lors de l'enregistrement de la dépense: {e}")
         
-        print(f"✅ Assistance payée: {self.montant:,.0f} FCFA prélevés du fonds social")
-        print(f"   📋 Dépense enregistrée pour renflouement en fin d'exercice")
+        print(f"Assistance payée: {self.montant:,.0f} FCFA prélevés du fonds social")
+        print(f"  Dépense enregistrée pour renflouement en fin d'exercice")
 
 
 class Renflouement(models.Model):
@@ -671,6 +835,29 @@ class Renflouement(models.Model):
     )
     cause = models.TextField(verbose_name="Cause du renflouement",blank=True)
     type_cause = models.CharField(max_length=40, choices=TYPE_CAUSE_CHOICES, verbose_name="Type de cause")
+    
+    # ✅ NOUVEAUX CHAMPS pour le renflouement proportionnel
+    exercice_renflouement = models.ForeignKey(
+        'core.Exercice', 
+        on_delete=models.CASCADE, 
+        related_name='renflouements_fin_exercice',
+        null=True, blank=True,
+        verbose_name="Exercice de renflouement",
+        help_text="Exercice pour lequel ce renflouement a été calculé"
+    )
+    ratio_caisse_inscription = models.DecimalField(
+        max_digits=5, decimal_places=2, 
+        null=True, blank=True,
+        verbose_name="Ratio caisse inscription (%)",
+        help_text="Pourcentage des paiements qui va à la caisse inscription"
+    )
+    ratio_fonds_social = models.DecimalField(
+        max_digits=5, decimal_places=2, 
+        null=True, blank=True,
+        verbose_name="Ratio fonds social (%)",
+        help_text="Pourcentage des paiements qui va au fonds social"
+    )
+    
     date_creation = models.DateTimeField(auto_now_add=True, verbose_name="Date de création")
     date_derniere_modification = models.DateTimeField(auto_now=True)
     
@@ -695,13 +882,49 @@ class Renflouement(models.Model):
     @property
     def pourcentage_paye(self):
         """Calcule le pourcentage payé"""
-        if self.montant_du == 0:
+        if not self.montant_du or self.montant_du == 0:
             return 100
         return (self.montant_paye / self.montant_du) * 100
+    
+    def calculer_repartition_paiement(self, montant_paiement):
+        """
+        Calcule la répartition d'un paiement selon les ratios définis
+        
+        Args:
+            montant_paiement (Decimal): Montant du paiement à répartir
+            
+        Returns:
+            dict: {
+                'caisse_inscription': Decimal,
+                'fonds_social': Decimal,
+                'total': Decimal
+            }
+        """
+        if not self.ratio_caisse_inscription or not self.ratio_fonds_social:
+            # Ancien système : tout va au fonds social
+            return {
+                'caisse_inscription': Decimal('0'),
+                'fonds_social': montant_paiement,
+                'total': montant_paiement
+            }
+        
+        # Nouveau système proportionnel
+        montant_caisse = (montant_paiement * self.ratio_caisse_inscription) / Decimal('100')
+        montant_fonds = (montant_paiement * self.ratio_fonds_social) / Decimal('100')
+        
+        # Arrondir pour éviter les problèmes de précision
+        montant_caisse = montant_caisse.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        montant_fonds = montant_fonds.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        
+        return {
+            'caisse_inscription': montant_caisse,
+            'fonds_social': montant_fonds,
+            'total': montant_caisse + montant_fonds
+        }
 
 class PaiementRenflouement(models.Model):
     """
-    Paiements de renflouement par tranche
+    Paiements de renflouement par tranche avec répartition proportionnelle
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     renflouement = models.ForeignKey(Renflouement, on_delete=models.CASCADE, related_name='paiements')
@@ -710,6 +933,29 @@ class PaiementRenflouement(models.Model):
         validators=[MinValueValidator(0)],
         verbose_name="Montant payé (FCFA)"
     )
+    
+    # ✅ NOUVEAUX CHAMPS pour la traçabilité de la répartition
+    montant_caisse_inscription = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0,
+        verbose_name="Montant vers caisse inscription (FCFA)",
+        help_text="Partie du paiement qui va à la caisse inscription"
+    )
+    montant_fonds_social = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0,
+        verbose_name="Montant vers fonds social (FCFA)",
+        help_text="Partie du paiement qui va au fonds social"
+    )
+    ratio_caisse_utilise = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True,
+        verbose_name="Ratio caisse utilisé (%)",
+        help_text="Ratio caisse inscription utilisé pour ce paiement"
+    )
+    ratio_fonds_utilise = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True,
+        verbose_name="Ratio fonds utilisé (%)",
+        help_text="Ratio fonds social utilisé pour ce paiement"
+    )
+    
     session = models.ForeignKey(Session, on_delete=models.CASCADE, related_name='paiements_renflouement')
     date_paiement = models.DateTimeField(auto_now_add=True, verbose_name="Date de paiement")
     notes = models.TextField(blank=True, verbose_name="Notes")
@@ -723,12 +969,25 @@ class PaiementRenflouement(models.Model):
         return f"{self.renflouement.membre.numero_membre} - {self.montant:,.0f} FCFA ({self.date_paiement.date()})"
     
     def save(self, *args, **kwargs):
-        # Utiliser un indicateur fiable pour nouvelle instance et une transaction
         is_new = getattr(self._state, 'adding', True)
         from django.db import transaction as _transaction
-        from core.models import FondsSocial
+        from core.models import FondsSocial, CaisseInscription
 
         with _transaction.atomic():
+            # ✅ NOUVEAU : Calcul de la répartition avant sauvegarde
+            if is_new and self.montant > 0:
+                repartition = self.renflouement.calculer_repartition_paiement(self.montant)
+                
+                self.montant_caisse_inscription = repartition['caisse_inscription']
+                self.montant_fonds_social = repartition['fonds_social']
+                self.ratio_caisse_utilise = self.renflouement.ratio_caisse_inscription
+                self.ratio_fonds_utilise = self.renflouement.ratio_fonds_social
+                
+                print(f"💰 Répartition paiement renflouement {self.renflouement.membre.numero_membre}:")
+                print(f"   - Total: {self.montant:,.0f} FCFA")
+                print(f"   - Caisse inscription: {self.montant_caisse_inscription:,.0f} FCFA ({self.ratio_caisse_utilise}%)")
+                print(f"   - Fonds social: {self.montant_fonds_social:,.0f} FCFA ({self.ratio_fonds_utilise}%)")
+
             super().save(*args, **kwargs)
 
             # Mise à jour du montant payé du renflouement (agrégation sûre)
@@ -736,39 +995,137 @@ class PaiementRenflouement(models.Model):
             self.renflouement.montant_paye = total
             self.renflouement.save()
 
+            # Mise à jour du statut du membre
             try:
+                from core.models import Membre  # Import local pour éviter les conflits
                 if self.renflouement.membre.calculer_statut_en_regle():
-                    # Mise à jour atomique
                     Membre.objects.filter(pk=self.renflouement.membre.pk).update(statut='EN_REGLE')
             except Exception as e:
                 print(f"Erreur de calcul de statut en règle: {e}")
 
-            # Alimenter le fonds social pour les paiements de renflouement (nouveaux paiements uniquement)
-            if is_new and self.montant and self.montant > 0:
+            # ✅ NOUVEAU : Alimentation proportionnelle des caisses
+            if is_new and self.montant > 0:
                 try:
-                    fonds = FondsSocial.get_fonds_actuel()
-                    if fonds:
-                        desc = f"Renflouement {self.renflouement.membre.numero_membre} - {self.renflouement.cause}"
-                        fonds.ajouter_montant(self.montant, description=desc)
-                        print(f"Debug: renflouement ajouté {self.montant}")
-                    else:
-                        print("Aucun fonds social actuel trouvé pour renflouement.")
+                    # Alimentation de la caisse inscription
+                    if self.montant_caisse_inscription > 0:
+                        caisse = CaisseInscription.get_caisse_actuelle()
+                        if caisse:
+                            desc = f"Renflouement {self.renflouement.membre.numero_membre} - Part caisse inscription ({self.ratio_caisse_utilise}%)"
+                            caisse.ajouter_montant(self.montant_caisse_inscription, description=desc)
+                            print(f"✅ Caisse inscription alimentée: +{self.montant_caisse_inscription:,.0f} FCFA")
+                    
+                    # Alimentation du fonds social
+                    if self.montant_fonds_social > 0:
+                        fonds = FondsSocial.get_fonds_actuel()
+                        if fonds:
+                            desc = f"Renflouement {self.renflouement.membre.numero_membre} - Part fonds social ({self.ratio_fonds_utilise}%)"
+                            fonds.ajouter_montant(self.montant_fonds_social, description=desc)
+                            print(f"✅ Fonds social alimenté: +{self.montant_fonds_social:,.0f} FCFA")
+                            
                 except Exception as e:
-                    print(f"Erreur lors de l'alimentation du fonds social (renflouement): {e}")
-        
-        is_new = self.pk is None
-        # Mise à jour du montant payé du renflouement
-        self.renflouement.montant_paye = sum(
-            p.montant for p in self.renflouement.paiements.all()
+                    print(f"Erreur lors de l'alimentation des caisses (renflouement): {e}")
+
+
+class RepartitionRenflouementExercice(models.Model):
+    """
+    Modèle pour stocker les calculs de répartition de renflouement de fin d'exercice
+    Permet la traçabilité complète des calculs
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    exercice = models.OneToOneField(
+        'core.Exercice',
+        on_delete=models.CASCADE,
+        related_name='repartition_renflouement',
+        verbose_name="Exercice"
+    )
+    
+    # Données de calcul
+    total_sorties_caisse_inscription = models.DecimalField(
+        max_digits=15, decimal_places=2,
+        verbose_name="Total sorties caisse inscription (FCFA)",
+        help_text="Somme de toutes les sorties de la caisse inscription"
+    )
+    total_sorties_fonds_social = models.DecimalField(
+        max_digits=15, decimal_places=2,
+        verbose_name="Total sorties fonds social (FCFA)",
+        help_text="Somme de toutes les sorties du fonds social"
+    )
+    total_sorties_global = models.DecimalField(
+        max_digits=15, decimal_places=2,
+        verbose_name="Total sorties global (FCFA)",
+        help_text="Somme totale des sorties des deux caisses"
+    )
+    
+    # Ratios calculés
+    ratio_caisse_inscription = models.DecimalField(
+        max_digits=5, decimal_places=2,
+        verbose_name="Ratio caisse inscription (%)",
+        help_text="Pourcentage des sorties de la caisse inscription"
+    )
+    ratio_fonds_social = models.DecimalField(
+        max_digits=5, decimal_places=2,
+        verbose_name="Ratio fonds social (%)",
+        help_text="Pourcentage des sorties du fonds social"
+    )
+    
+    # Données des membres
+    nombre_membres_en_regle = models.IntegerField(
+        verbose_name="Nombre de membres en règle",
+        help_text="Nombre de membres en règle au moment du calcul"
+    )
+    nombre_membres_non_en_regle = models.IntegerField(
+        verbose_name="Nombre de membres non en règle",
+        help_text="Nombre de membres non en règle qui devront payer"
+    )
+    nombre_membres_total = models.IntegerField(
+        verbose_name="Nombre total de membres",
+        help_text="Nombre total de membres actifs"
+    )
+    
+    # Montant par membre
+    montant_par_membre = models.DecimalField(
+        max_digits=12, decimal_places=2,
+        verbose_name="Montant par membre (FCFA)",
+        help_text="Montant que chaque membre non en règle doit payer"
+    )
+    
+    # Métadonnées
+    date_calcul = models.DateTimeField(auto_now_add=True, verbose_name="Date de calcul")
+    calcule_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        verbose_name="Calculé par"
+    )
+    notes_calcul = models.TextField(
+        blank=True,
+        verbose_name="Notes de calcul",
+        help_text="Détails supplémentaires sur le calcul"
+    )
+    
+    class Meta:
+        verbose_name = "Répartition renflouement exercice"
+        verbose_name_plural = "Répartitions renflouements exercices"
+        ordering = ['-date_calcul']
+    
+    def __str__(self):
+        return f"Répartition {self.exercice.nom} - {self.montant_par_membre:,.0f} FCFA/membre"
+    
+    @property
+    def formule_calcul(self):
+        """Retourne la formule de calcul pour affichage"""
+        return (
+            f"{self.total_sorties_global:,.0f} FCFA ÷ {self.nombre_membres_en_regle} membres en règle = "
+            f"{self.montant_par_membre:,.0f} FCFA par membre"
         )
-        self.renflouement.save()
-        try:
-            if self.renflouement.membre.calculer_statut_en_regle() :
-                self.renflouement.membre.statut = 'EN_REGLE'
-                self.renflouement.membre.save()
-        except :
-            print(f"Erreur de calcul de sttus en regle  ")
-            pass
+    
+    @property
+    def detail_ratios(self):
+        """Retourne le détail des ratios pour affichage"""
+        return (
+            f"Caisse inscription: {self.total_sorties_caisse_inscription:,.0f} FCFA ({self.ratio_caisse_inscription}%) | "
+            f"Fonds social: {self.total_sorties_fonds_social:,.0f} FCFA ({self.ratio_fonds_social}%)"
+        )
                 
 from logging import config
 from django.db import models
@@ -1043,6 +1400,135 @@ class EpargneTransaction(models.Model):
     def __str__(self):
         signe = "+" if self.montant >= 0 else ""
         return f"{self.membre.numero_membre} - {self.get_type_transaction_display()} - {signe}{self.montant:,.0f} FCFA"
+
+
+class PenaliteEmprunt(models.Model):
+    """
+    Modèle pour tracer toutes les pénalités appliquées aux emprunts
+    Permet une transparence totale pour justifier devant les membres
+    """
+    TYPE_PENALITE_CHOICES = [
+        ('RETARD_PALIER', 'Pénalité de retard par palier'),
+        ('RETARD_MANUEL', 'Pénalité manuelle'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    emprunt = models.ForeignKey(Emprunt, on_delete=models.CASCADE, related_name='penalites')
+    type_penalite = models.CharField(
+        max_length=20, 
+        choices=TYPE_PENALITE_CHOICES, 
+        default='RETARD_PALIER',
+        verbose_name="Type de pénalité"
+    )
+    
+    # Détails de calcul pour transparence
+    palier = models.CharField(
+        max_length=20, 
+        verbose_name="Palier (ex: Palier-3, Palier-6)",
+        help_text="Indique à quel palier cette pénalité a été appliquée"
+    )
+    sessions_ecoulees = models.IntegerField(
+        verbose_name="Nombre de sessions écoulées",
+        help_text="Nombre de sessions depuis l'octroi de l'emprunt"
+    )
+    
+    # Montants de base pour le calcul
+    montant_reste_avant = models.DecimalField(
+        max_digits=12, decimal_places=2,
+        verbose_name="Montant restant avant pénalité (FCFA)",
+        help_text="Le montant qui restait à rembourser avant cette pénalité"
+    )
+    taux_applique = models.DecimalField(
+        max_digits=5, decimal_places=2,
+        verbose_name="Taux d'intérêt appliqué (%)",
+        help_text="Le taux utilisé pour calculer la pénalité"
+    )
+    
+    # Détail des montants
+    montant_interet_taux = models.DecimalField(
+        max_digits=12, decimal_places=2,
+        verbose_name="Montant intérêt (reste × taux) (FCFA)",
+        help_text="Montant calculé: reste_à_payer × taux_intérêt"
+    )
+    montant_penalite_fixe = models.DecimalField(
+        max_digits=12, decimal_places=2,
+        default=Decimal('15000'),
+        verbose_name="Pénalité fixe (FCFA)",
+        help_text="Montant fixe de pénalité (généralement 15 000 FCFA)"
+    )
+    montant_total_penalite = models.DecimalField(
+        max_digits=12, decimal_places=2,
+        verbose_name="Total pénalité (FCFA)",
+        help_text="Somme: intérêt_taux + pénalité_fixe"
+    )
+    
+    # Informations de traçabilité
+    date_application = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Date d'application"
+    )
+    appliquee_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        verbose_name="Appliquée par",
+        help_text="Utilisateur qui a déclenché cette pénalité (ou système automatique)"
+    )
+    session_application = models.ForeignKey(
+        Session,
+        on_delete=models.CASCADE,
+        verbose_name="Session d'application",
+        help_text="Session pendant laquelle cette pénalité a été appliquée"
+    )
+    
+    # Justification et notes
+    justification = models.TextField(
+        blank=True,
+        verbose_name="Justification",
+        help_text="Explication détaillée de pourquoi cette pénalité a été appliquée"
+    )
+    notes_complementaires = models.TextField(
+        blank=True,
+        verbose_name="Notes complémentaires"
+    )
+    
+    class Meta:
+        verbose_name = "Pénalité d'emprunt"
+        verbose_name_plural = "Pénalités d'emprunts"
+        ordering = ['-date_application']
+        indexes = [
+            models.Index(fields=['emprunt', 'palier']),
+            models.Index(fields=['date_application']),
+            models.Index(fields=['type_penalite']),
+        ]
+        # Éviter les doublons de pénalité pour un même palier
+        unique_together = ['emprunt', 'palier']
+    
+    def __str__(self):
+        return f"{self.emprunt.membre.numero_membre} - {self.palier} - {self.montant_total_penalite:,.0f} FCFA"
+    
+    def save(self, *args, **kwargs):
+        """Calcul automatique du montant total"""
+        self.montant_total_penalite = self.montant_interet_taux + self.montant_penalite_fixe
+        
+        # Génération automatique de la justification si vide
+        if not self.justification:
+            self.justification = (
+                f"Pénalité automatique {self.palier} appliquée après {self.sessions_ecoulees} sessions. "
+                f"Calcul: {self.montant_reste_avant:,.0f} FCFA × {self.taux_applique}% = "
+                f"{self.montant_interet_taux:,.0f} FCFA + {self.montant_penalite_fixe:,.0f} FCFA (fixe) = "
+                f"{self.montant_total_penalite:,.0f} FCFA total."
+            )
+        
+        super().save(*args, **kwargs)
+    
+    @property
+    def formule_calcul(self):
+        """Retourne la formule de calcul pour affichage"""
+        return (
+            f"{self.montant_reste_avant:,.0f} × {self.taux_applique}% + "
+            f"{self.montant_penalite_fixe:,.0f} = {self.montant_total_penalite:,.0f} FCFA"
+        )
 
 
 

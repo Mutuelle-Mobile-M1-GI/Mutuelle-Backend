@@ -324,6 +324,7 @@ class CaisseInscriptionAdmin(admin.ModelAdmin):
     montant_total_formate.short_description = 'Montant total'
 
     def derniers_mouvements(self, obj):
+        from django.utils.safestring import mark_safe
         derniers = obj.mouvements.all()[:3]
         html = ""
         for mouvement in derniers:
@@ -333,7 +334,7 @@ class CaisseInscriptionAdmin(admin.ModelAdmin):
                 '<div style="color: {};">{}{} FCFA</div>',
                 color, signe, mouvement.montant
             )
-        return format_html(html) if html else "Aucun mouvement"
+        return mark_safe(html) if html else "Aucun mouvement"
     derniers_mouvements.short_description = 'Derniers mouvements'
 
 

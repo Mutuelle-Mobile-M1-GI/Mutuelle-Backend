@@ -179,17 +179,35 @@ class AdministrationDashboardViewSet(viewsets.ViewSet):
     
     def _get_membres_problematiques(self):
         """Membres ayant des problèmes financiers"""
-        # Membres avec inscription non complète depuis plus de 3 mois
-        from datetime import timedelta
-        three_months_ago = timezone.now() - timedelta(days=90)
+        # Membres avec inscription non complète depuis plus de 3 sessions
+        from core.models import Exercice, Session
         
         config = ConfigurationMutuelle.get_configuration()
         
         membres_problematiques = []
         
-        # Inscription non terminée
+        # Vérifier s'il y a un exercice en cours
+        exercice_actuel = Exercice.get_exercice_en_cours()
+        if not exercice_actuel:
+            return membres_problematiques
+        
+        # Compter le nombre de sessions terminées dans cet exercice
+        sessions_terminees = Session.objects.filter(
+            exercice=exercice_actuel,
+            statut='TERMINEE'
+        ).count()
+        
+        # Période de grâce = 3 sessions
+        PERIODE_GRACE_SESSIONS = 3
+        
+        # Si moins de 3 sessions terminées, pas encore de membres problématiques
+        if sessions_terminees < PERIODE_GRACE_SESSIONS:
+            return membres_problematiques
+        
+        # Inscription non terminée après la période de grâce
         membres_inscription_incomplete = Membre.objects.filter(
-            date_inscription__lte=three_months_ago
+            date_inscription__lte=exercice_actuel.date_debut,
+            actif=True
         ).annotate(
             total_paye=Sum('paiements_inscription__montant')
         ).filter(
@@ -203,7 +221,7 @@ class AdministrationDashboardViewSet(viewsets.ViewSet):
                 'numero': membre.numero_membre,
                 'nom': membre.utilisateur.nom_complet,
                 'probleme': 'INSCRIPTION_INCOMPLETE',
-                'details': f"Payé {total_paye:,.0f} sur {config.montant_inscription:,.0f}"
+                'details': f"Payé {total_paye:,.0f} sur {config.montant_inscription:,.0f} (après {sessions_terminees} sessions)"
             })
         
         return membres_problematiques[:10]  # Top 10
