@@ -1279,10 +1279,69 @@ class PaiementSolidarite(models.Model):
         # ❌ RETIRER unique_together car on peut payer en plusieurs fois
         # unique_together = [['membre', 'session']]
         
+    def clean(self):
+        from django.core.exceptions import ValidationError
+
+        if self.membre and not self.membre.inscription_terminee:
+            raise ValidationError({
+                'membre': (
+                    "Le membre n'a pas terminé son inscription. "
+                    "Le paiement de solidarité est interdit tant que l'inscription n'est pas complète."
+                )
+            })
+
     def save(self, *args, **kwargs):
         # Sauvegarde et alimentation du fonds social en transaction
+        is_new = getattr(self, '_state', None) and getattr(self._state, 'adding', True)
+
+        if is_new and not self.montant_solidarite_du:
+            from core.models import ConfigurationMutuelle, SolidariteExerciceReport
+
+            premier_paiement = PaiementSolidarite.objects.filter(
+                membre=self.membre
+            ).order_by('date_paiement').first()
+
+            if premier_paiement:
+                montant_de_base = premier_paiement.montant_solidarite_du
+            else:
+                config = ConfigurationMutuelle.get_configuration()
+                montant_de_base = config.montant_solidarite
+
+            report = SolidariteExerciceReport.objects.filter(
+                membre=self.membre,
+                exercice_cible=self.session.exercice
+            ).first()
+
+            if report:
+                self.montant_solidarite_du = max(montant_de_base + report.montant_reporte, Decimal('0'))
+            else:
+                self.montant_solidarite_du = montant_de_base
+
+        self.full_clean()
+
+        if is_new:
+            total_deja_paye = PaiementSolidarite.objects.filter(
+                membre=self.membre,
+                session__exercice=self.session.exercice
+            ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+
+            if total_deja_paye >= self.montant_solidarite_du:
+                from django.core.exceptions import ValidationError
+                raise ValidationError(
+                    f"❌ Solidarité déjà complète pour l'exercice {self.session.exercice.nom}. "
+                    f"Payé: {total_deja_paye:,.0f} FCFA, Dû: {self.montant_solidarite_du:,.0f} FCFA"
+                )
+
+            if total_deja_paye + self.montant > self.montant_solidarite_du:
+                surplus = (total_deja_paye + self.montant) - self.montant_solidarite_du
+                from django.core.exceptions import ValidationError
+                raise ValidationError(
+                    f"❌ Paiement excessif. Déjà payé: {total_deja_paye:,.0f} FCFA, "
+                    f"Ce paiement: {self.montant:,.0f} FCFA, Total: {total_deja_paye + self.montant:,.0f} FCFA, "
+                    f"Dû: {self.montant_solidarite_du:,.0f} FCFA. Surplus: {surplus:,.0f} FCFA"
+                )
+
         with transaction.atomic():
-            is_new = getattr(self, '_state', None) and getattr(self._state, 'adding', True)
             super().save(*args, **kwargs)
 
             if is_new and self.montant and self.montant > 0:
@@ -1296,77 +1355,7 @@ class PaiementSolidarite(models.Model):
                         print("Aucun fonds social actuel trouvé pour enregistrer la solidarité.")
                 except Exception as e:
                     print(f"Erreur lors de l'alimentation du fonds social: {e}")
-                    
-            is_new = self.pk is None
 
-            # ✅ LOGIC AMÉLIORÉE: Calculer le montant dû en tenant compte du report de l'exercice précédent
-            if is_new and not self.montant_solidarite_du:
-                from core.models import ConfigurationMutuelle, SolidariteExerciceReport
-                config = ConfigurationMutuelle.get_configuration()
-                montant_de_base = self.montant_solidarite_du
-
-                # Vérifier s'il y a un report (dette ou surplus) depuis l'exercice précédent
-                report = SolidariteExerciceReport.objects.filter(
-                    membre=self.membre,
-                    exercice_cible=self.session.exercice
-                ).first()
-
-                if report:
-                    # montant_reporte > 0 = dette (ajouter au montant dû)
-                    # montant_reporte < 0 = surplus (réduire le montant dû, minimum 0)
-                    montant_ajuste = montant_de_base + report.montant_reporte
-                    self.montant_solidarite_du = max(montant_ajuste, Decimal('0'))
-                    nature_report = "dette" if report.montant_reporte > 0 else "surplus"
-                    print(
-                        f"💰 Solidarité {self.session.nom}: montant de base={montant_de_base:,.0f} FCFA, "
-                        f"report ({nature_report})={report.montant_reporte:,.0f} FCFA, "
-                        f"montant total dû={self.montant_solidarite_du:,.0f} FCFA"
-                    )
-                else:
-                    self.montant_solidarite_du = montant_de_base
-                    print(f"💰 Solidarité session {self.session.nom}: montant dû = {self.montant_solidarite_du}")
-
-            # ✅ Vérifier si le membre n'a pas déjà payé la solidarité complète pour cet exercice
-            if is_new:
-                total_deja_paye = PaiementSolidarite.objects.filter(
-                    membre=self.membre,
-                    session__exercice=self.session.exercice
-                ).exclude(pk=self.pk).aggregate(total=Sum('montant'))['total'] or Decimal('0')
-                
-                if total_deja_paye >= self.montant_solidarite_du:
-                    from django.core.exceptions import ValidationError
-                    raise ValidationError(
-                        f"❌ Solidarité déjà complète pour l'exercice {self.session.exercice.nom}. "
-                        f"Payé: {total_deja_paye:,.0f} FCFA, Dû: {self.montant_solidarite_du:,.0f} FCFA"
-                    )
-                
-                # Vérifier que ce paiement ne fait pas dépasser le montant dû
-                if total_deja_paye + self.montant > self.montant_solidarite_du:
-                    surplus = (total_deja_paye + self.montant) - self.montant_solidarite_du
-                    from django.core.exceptions import ValidationError
-                    raise ValidationError(
-                        f"❌ Paiement excessif. Déjà payé: {total_deja_paye:,.0f} FCFA, "
-                        f"Ce paiement: {self.montant:,.0f} FCFA, Total: {total_deja_paye + self.montant:,.0f} FCFA, "
-                        f"Dû: {self.montant_solidarite_du:,.0f} FCFA. Surplus: {surplus:,.0f} FCFA"
-                    )
-
-            # ✅ CORRECTION: Ne mettre à jour le statut que si on peut définir les statuts (≥3 sessions)
-            try:
-                from core.models import Membre
-                peut_definir_statuts = Membre.peut_definir_statuts_membre(membre=self.membre)
-
-                if peut_definir_statuts and self.membre.calculer_statut_en_regle():
-                    self.membre.statut = 'EN_REGLE'
-                    self.membre.save()
-                elif peut_definir_statuts:
-                    # Si on peut définir les statuts mais membre n'est pas en règle
-                    self.membre.statut = 'NON_EN_REGLE'
-                    self.membre.save()
-            except Exception as e:
-                print(f"Erreur de calcul de statut en règle: {e}")
-                pass
-        
-    
     def __str__(self):
         return f"{self.membre.numero_membre} - Session {self.session.nom} - {self.montant:,.0f} FCFA"
 
@@ -1400,6 +1389,21 @@ class EpargneTransaction(models.Model):
     def __str__(self):
         signe = "+" if self.montant >= 0 else ""
         return f"{self.membre.numero_membre} - {self.get_type_transaction_display()} - {signe}{self.montant:,.0f} FCFA"
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+
+        if self.membre and not self.membre.inscription_terminee:
+            raise ValidationError({
+                'membre': (
+                    "Le membre n'a pas terminé son inscription. "
+                    "Il ne peut pas effectuer d'opérations d'épargne tant que l'inscription n'est pas complète."
+                )
+            })
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
 
 
 class PenaliteEmprunt(models.Model):
