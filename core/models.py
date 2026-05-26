@@ -1218,6 +1218,12 @@ class Membre(models.Model):
         verbose_name="Inscription terminée",
         help_text="True si le membre a payé la totalité de son inscription"
     )
+    # Champ solidarité : paiement unique à vie
+    solidarite_terminee = models.BooleanField(
+        default=False,
+        verbose_name="Solidarité terminée",
+        help_text="True si le membre a payé la totalité de sa solidarité (une fois dans sa vie)"
+    )
     actif=models.BooleanField(
         default=True,
         verbose_name="Membre actif",
@@ -1450,9 +1456,32 @@ class Membre(models.Model):
             print(f"🎓 Inscription {self.numero_membre}: {ancien_statut} → {self.inscription_terminee}")
         
         return self.inscription_terminee
-            
-        
 
+    def update_solidarite_terminee(self):
+        """
+        Met à jour automatiquement solidarite_terminee.
+        La solidarité est un paiement unique à vie :
+        - cumul de TOUS les paiements de solidarité du membre (toutes sessions confondues).
+        - si le cumul >= montant_solidarite config actuel, solidarite_terminee = True.
+        """
+        from transactions.models import PaiementSolidarite
+        from core.models import ConfigurationMutuelle
+        from decimal import Decimal
+
+        config = ConfigurationMutuelle.get_configuration()
+        montant_total_du = config.montant_solidarite
+
+        total_paye = PaiementSolidarite.objects.filter(
+            membre=self
+        ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+
+        ancien_statut = self.solidarite_terminee
+        self.solidarite_terminee = (total_paye >= montant_total_du)
+
+        if ancien_statut != self.solidarite_terminee:
+            print(f"🤝 Solidarité {self.numero_membre}: {ancien_statut} → {self.solidarite_terminee}")
+
+        return self.solidarite_terminee
 
 class FondsSocial(models.Model):
     """

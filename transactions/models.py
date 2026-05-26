@@ -1291,70 +1291,74 @@ class PaiementSolidarite(models.Model):
             })
 
     def save(self, *args, **kwargs):
-        # Sauvegarde et alimentation du fonds social en transaction
+        """
+        Solidarité : paiement unique à vie (comme l'inscription).
+        - Le membre paie une seule fois (en une ou plusieurs tranches) jusqu'au montant total.
+        - Si le montant de la solidarité augmente dans la config, le membre peut payer le supplément.
+        - Tout paiement dépassant le montant restant est rejeté avec un message clair.
+        """
         is_new = getattr(self, '_state', None) and getattr(self._state, 'adding', True)
 
-        if is_new and not self.montant_solidarite_du:
-            from core.models import ConfigurationMutuelle, SolidariteExerciceReport
-
-            premier_paiement = PaiementSolidarite.objects.filter(
-                membre=self.membre
-            ).order_by('date_paiement').first()
-
-            if premier_paiement:
-                montant_de_base = premier_paiement.montant_solidarite_du
-            else:
-                config = ConfigurationMutuelle.get_configuration()
-                montant_de_base = config.montant_solidarite
-
-            report = SolidariteExerciceReport.objects.filter(
-                membre=self.membre,
-                exercice_cible=self.session.exercice
-            ).first()
-
-            if report:
-                self.montant_solidarite_du = max(montant_de_base + report.montant_reporte, Decimal('0'))
-            else:
-                self.montant_solidarite_du = montant_de_base
-
-        self.full_clean()
-
         if is_new:
+            from core.models import ConfigurationMutuelle
+            from django.core.exceptions import ValidationError
+            from django.db.models import Sum
+
+            config = ConfigurationMutuelle.get_configuration()
+            montant_solidarite_actuel = config.montant_solidarite
+
+            # Montant dû à vie = montant configuré actuellement
+            if not self.montant_solidarite_du:
+                self.montant_solidarite_du = montant_solidarite_actuel
+
+            # Total déjà payé par ce membre (TOUTES sessions confondues)
             total_deja_paye = PaiementSolidarite.objects.filter(
-                membre=self.membre,
-                session__exercice=self.session.exercice
+                membre=self.membre
             ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
 
-            if total_deja_paye >= self.montant_solidarite_du:
-                from django.core.exceptions import ValidationError
+            montant_restant = montant_solidarite_actuel - total_deja_paye
+
+            # Cas 1 : solidarité déjà complète
+            if total_deja_paye >= montant_solidarite_actuel:
                 raise ValidationError(
-                    f"❌ Solidarité déjà complète pour l'exercice {self.session.exercice.nom}. "
-                    f"Payé: {total_deja_paye:,.0f} FCFA, Dû: {self.montant_solidarite_du:,.0f} FCFA"
+                    f"❌ La solidarité de {self.membre.numero_membre} est déjà complète. "
+                    f"Montant dû : {montant_solidarite_actuel:,.0f} FCFA — "
+                    f"Déjà payé : {total_deja_paye:,.0f} FCFA."
                 )
 
-            if total_deja_paye + self.montant > self.montant_solidarite_du:
-                surplus = (total_deja_paye + self.montant) - self.montant_solidarite_du
-                from django.core.exceptions import ValidationError
+            # Cas 2 : paiement trop élevé (surplus)
+            if self.montant > montant_restant:
                 raise ValidationError(
-                    f"❌ Paiement excessif. Déjà payé: {total_deja_paye:,.0f} FCFA, "
-                    f"Ce paiement: {self.montant:,.0f} FCFA, Total: {total_deja_paye + self.montant:,.0f} FCFA, "
-                    f"Dû: {self.montant_solidarite_du:,.0f} FCFA. Surplus: {surplus:,.0f} FCFA"
+                    f"❌ Paiement trop élevé. "
+                    f"Montant restant à payer pour la solidarité : {montant_restant:,.0f} FCFA. "
+                    f"Vous avez tenté de payer : {self.montant:,.0f} FCFA. "
+                    f"Veuillez saisir exactement {montant_restant:,.0f} FCFA ou moins."
                 )
+
+        self.full_clean()
 
         with transaction.atomic():
             super().save(*args, **kwargs)
 
             if is_new and self.montant and self.montant > 0:
+                # Alimenter le fonds social
                 try:
                     fonds = FondsSocial.get_fonds_actuel()
                     if fonds:
                         desc = f"Solidarité {self.membre.numero_membre} - Session {self.session.nom}"
                         fonds.ajouter_montant(self.montant, description=desc)
-                        print(f"Debug: ajout effectué {self.montant}")
+                        print(f"Debug: ajout solidarité fonds social {self.montant}")
                     else:
                         print("Aucun fonds social actuel trouvé pour enregistrer la solidarité.")
                 except Exception as e:
                     print(f"Erreur lors de l'alimentation du fonds social: {e}")
+
+                # Mettre à jour solidarite_terminee du membre
+                try:
+                    self.membre.update_solidarite_terminee()
+                    self.membre.save(update_fields=['solidarite_terminee'])
+                except Exception as e:
+                    print(f"Erreur lors de la mise à jour solidarite_terminee: {e}")
 
     def __str__(self):
         return f"{self.membre.numero_membre} - Session {self.session.nom} - {self.montant:,.0f} FCFA"
