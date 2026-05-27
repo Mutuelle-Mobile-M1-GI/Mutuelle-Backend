@@ -58,94 +58,69 @@ class PaiementInscriptionSerializer(serializers.ModelSerializer):
 
 class PaiementSolidariteSerializer(serializers.ModelSerializer):
     """
-    Serializer pour les paiements de solidarité.
-    Expose également pour chaque enregistrement :
-    - montant_paye_exercice_en_cours : ce que le membre a déjà versé sur l'exercice en cours
-    - montant_reporte             : dette reportée de l'exercice précédent (SolidariteExerciceReport)
+    Serializer pour les paiements de solidarité (paiement unique à vie).
+    Expose pour chaque enregistrement :
+    - montant_paye_total       : total cumulé payé par le membre (toutes sessions)
+    - montant_restant_solidarite : ce qu'il reste à payer pour compléter la solidarité
+    - solidarite_terminee      : True si la solidarité est complètement réglée
     """
     membre_info = MembreSimpleSerializer(source='membre', read_only=True)
     session_nom = serializers.CharField(source='session.nom', read_only=True)
 
     # ── Champs calculés pour la barre de progression frontend ──────────────
-    montant_paye_exercice_en_cours = serializers.SerializerMethodField()
-    montant_reporte = serializers.SerializerMethodField()
+    montant_paye_total = serializers.SerializerMethodField()
+    montant_restant_solidarite = serializers.SerializerMethodField()
+    solidarite_terminee = serializers.SerializerMethodField()
 
     class Meta:
         model = PaiementSolidarite
         fields = [
             'id', 'membre', 'membre_info', 'session', 'session_nom',
             'montant', 'montant_solidarite_du', 'date_paiement', 'notes',
-            'montant_paye_exercice_en_cours', 'montant_reporte',
+            'montant_paye_total', 'montant_restant_solidarite', 'solidarite_terminee',
         ]
         extra_kwargs = {
-            'montant_solidarite_du': {'required': False, 'read_only': False},
+            'montant_solidarite_du': {'required': False, 'read_only': True},
         }
 
-    # ── get_montant_paye_exercice_en_cours ──────────────────────────────────
-    def get_montant_paye_exercice_en_cours(self, obj):
+    # ── get_montant_paye_total ───────────────────────────────────────────────
+    def get_montant_paye_total(self, obj):
         """
-        Total des paiements de solidarité de ce membre sur l'exercice en cours.
+        Total cumulé de tous les paiements de solidarité de ce membre (toutes sessions confondues).
         """
         from django.db.models import Sum
         from decimal import Decimal
-        from core.models import Exercice
-
-        exercice = Exercice.get_exercice_en_cours()
-        if not exercice:
-            return Decimal('0')
-
         total = PaiementSolidarite.objects.filter(
             membre=obj.membre,
-            session__exercice=exercice,
         ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
         return total
 
-    # ── get_montant_reporte ─────────────────────────────────────────────────
-    def get_montant_reporte(self, obj):
+    # ── get_montant_restant_solidarite ──────────────────────────────────────
+    def get_montant_restant_solidarite(self, obj):
         """
-        Montant reporté de l'exercice précédent pour ce membre.
-        Positif = dette à payer, Négatif = surplus (crédit).
-        Retourne 0 s'il n'y a pas de report.
+        Montant restant à payer pour compléter la solidarité à vie.
+        Retourne 0 si la solidarité est déjà complète.
         """
+        from django.db.models import Sum
         from decimal import Decimal
-        from core.models import Exercice, SolidariteExerciceReport
+        config = ConfigurationMutuelle.get_configuration()
+        montant_du = config.montant_solidarite
+        total_paye = PaiementSolidarite.objects.filter(
+            membre=obj.membre
+        ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+        return max(montant_du - total_paye, Decimal('0'))
 
-        exercice = Exercice.get_exercice_en_cours()
-        if not exercice:
-            return Decimal('0')
-
-        report = SolidariteExerciceReport.objects.filter(
-            membre=obj.membre,
-            exercice_cible=exercice,
-        ).first()
-        return report.montant_reporte if report else Decimal('0')
+    # ── get_solidarite_terminee ─────────────────────────────────────────────
+    def get_solidarite_terminee(self, obj):
+        """True si la solidarité est entièrement payée."""
+        return obj.membre.solidarite_terminee
 
     # ── create ──────────────────────────────────────────────────────────────
     def create(self, validated_data):
         """
-        Crée un paiement de solidarité en remplissant montant_solidarite_du.
-        Logique :
-        - Premier paiement pour ce membre → utiliser montant de la configuration
-        - Paiements suivants → utiliser le montant du premier paiement (pour cohérence)
+        Crée un paiement de solidarité.
+        montant_solidarite_du = montant configuré actuellement (rempli dans le modèle).
         """
-        from core.models import ConfigurationMutuelle
-
-        if 'montant_solidarite_du' not in validated_data or not validated_data.get('montant_solidarite_du'):
-            membre = validated_data.get('membre')
-            session = validated_data.get('session')
-
-            premier_paiement = PaiementSolidarite.objects.filter(
-                membre=membre
-            ).order_by('date_paiement').first()
-
-            if not premier_paiement:
-                config = ConfigurationMutuelle.get_configuration()
-                validated_data['montant_solidarite_du'] = config.montant_solidarite
-                print(f"📝 Premier paiement solidarité pour {membre.numero_membre}: montant dû = {validated_data['montant_solidarite_du']} FCFA")
-            else:
-                validated_data['montant_solidarite_du'] = premier_paiement.montant_solidarite_du
-                print(f"📝 Paiement suivant pour {membre.numero_membre} (session {session.nom}): montant dû = {validated_data['montant_solidarite_du']} FCFA (du premier paiement)")
-
         return super().create(validated_data)
 
     def validate(self, data):
