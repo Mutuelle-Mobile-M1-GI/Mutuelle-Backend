@@ -956,6 +956,157 @@ class RenflouementViewSet(viewsets.ModelViewSet):
                 'taux_solde': (renflouements_soldes / total_renflouements * 100) if total_renflouements > 0 else 0
             }
         })
+    
+    @action(detail=True, methods=['post'], permission_classes=[AllowAny])
+    def payer_avec_epargne(self, request, pk=None):
+        """
+        Payer un renflouement en puisant dans l'épargne personnelle du membre
+        
+        Body:
+        {
+            "montant": 50000.00,  # Optionnel, si absent on paie le montant entièrement
+            "notes": "Paiement depuis l'épargne"  # Optionnel
+        }
+        
+        Returns:
+        {
+            "success": true,
+            "message": "Renflouement payé avec succès",
+            "paiement": {...},
+            "renflouement": {...},
+            "epargne_transaction": {...}
+        }
+        """
+        print("=" * 60)
+        print("🔍 PAYER RENFLOUEMENT AVEC EPARGNE")
+        
+        try:
+            renflouement = self.get_object()
+            print(f"✅ Renflouement trouvé: {renflouement.id}")
+            print(f"   - Membre: {renflouement.membre.numero_membre}")
+            print(f"   - Montant dû: {renflouement.montant_du}")
+            print(f"   - Montant payé: {renflouement.montant_paye}")
+            
+            # Récupérer le montant du body (optionnel)
+            montant_a_payer = request.data.get('montant')
+            notes = request.data.get('notes', 'Paiement depuis l\'épargne personnelle')
+            
+            # Si le montant n'est pas spécifié, payer le montant restant
+            if montant_a_payer is None:
+                montant_a_payer = renflouement.montant_restant
+            else:
+                montant_a_payer = Decimal(str(montant_a_payer))
+            
+            print(f"🔍 Montant à payer: {montant_a_payer} FCFA")
+            
+            # Vérifications
+            if montant_a_payer <= 0:
+                return Response({
+                    'success': False,
+                    'error': 'Le montant à payer doit être supérieur à 0'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            if montant_a_payer > renflouement.montant_restant:
+                return Response({
+                    'success': False,
+                    'error': f'Le montant dépasse ce qui est dû. Montant restant: {renflouement.montant_restant} FCFA'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Vérifier l'épargne du membre
+            membre = renflouement.membre
+            epargne_disponible = membre.calculer_epargne_pure()
+            
+            print(f"🔍 Épargne disponible du membre: {epargne_disponible} FCFA")
+            print(f"🔍 Épargne requise: {montant_a_payer} FCFA")
+            
+            if epargne_disponible < montant_a_payer:
+                return Response({
+                    'success': False,
+                    'error': f'Épargne insuffisante. Disponible: {epargne_disponible:,.0f} FCFA, Nécessaire: {montant_a_payer:,.0f} FCFA'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Récupérer la session courante
+            from core.models import Session
+            current_session = Session.objects.filter(statut='EN_COURS').first()
+            if not current_session:
+                return Response({
+                    'success': False,
+                    'error': 'Aucune session active trouvée'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            print(f"✅ Session courante: {current_session.nom}")
+            
+            # Effectuer la transaction atomique
+            with transaction.atomic():
+                print(f"🔍 Début transaction atomique...")
+                
+                # 1. Créer la transaction d'épargne (retrait négatif)
+                print(f"1️⃣ Création de la transaction d'épargne (retrait)...")
+                epargne_transaction = EpargneTransaction.objects.create(
+                    membre=membre,
+                    type_transaction='RETRAIT_PRET',  # Utiliser RETRAIT_PRET comme type de retrait
+                    montant=-montant_a_payer,  # Négatif pour indiquer un retrait
+                    session=current_session,
+                    notes=f"Retrait pour paiement renflouement: {notes}"
+                )
+                print(f"✅ Transaction d'épargne créée: {epargne_transaction.id}")
+                
+                # 2. Créer le paiement de renflouement
+                print(f"2️⃣ Création du paiement de renflouement...")
+                paiement_renflouement = PaiementRenflouement.objects.create(
+                    renflouement=renflouement,
+                    montant=montant_a_payer,
+                    session=current_session,
+                    notes=f"Paiement depuis l'épargne personnelle - {notes}"
+                )
+                print(f"✅ Paiement renflouement créé: {paiement_renflouement.id}")
+                
+                # 3. Le modèle PaiementRenflouement met à jour automatiquement:
+                #    - Le montant_paye du renflouement
+                #    - La répartition entre caisse inscription et fonds social
+                #    - L'alimentation des caisses
+                print(f"3️⃣ Vérification de la mise à jour du renflouement...")
+                renflouement.refresh_from_db()
+                print(f"✅ Montant payé mis à jour: {renflouement.montant_paye} FCFA")
+                print(f"✅ Montant restant: {renflouement.montant_restant} FCFA")
+                print(f"✅ Renflouement soldé: {renflouement.is_solde}")
+            
+            # Sérialiser les résultats
+            paiement_serializer = PaiementRenflouementSerializer(paiement_renflouement)
+            renflouement_serializer = RenflouementSerializer(renflouement)
+            epargne_serializer = EpargneTransactionSerializer(epargne_transaction)
+            
+            print("=" * 60)
+            print("✅ PAIEMENT RENFLOUEMENT AVEC EPARGNE RÉUSSI")
+            
+            return Response({
+                'success': True,
+                'message': f'Renflouement payé avec succès! {montant_a_payer:,.0f} FCFA débité de l\'épargne',
+                'paiement': paiement_serializer.data,
+                'renflouement': renflouement_serializer.data,
+                'epargne_transaction': epargne_serializer.data,
+                'resume': {
+                    'epargne_avant': epargne_disponible,
+                    'epargne_utilisee': montant_a_payer,
+                    'epargne_apres': epargne_disponible - montant_a_payer,
+                    'montant_du_avant': Decimal(str(renflouement.montant_du)),
+                    'montant_paye': montant_a_payer,
+                    'montant_reste': renflouement.montant_restant,
+                    'renflouement_solde': renflouement.is_solde
+                }
+            }, status=status.HTTP_201_CREATED)
+            
+        except Exception as e:
+            print(f"❌ ERREUR: {str(e)}")
+            print(f"❌ TYPE: {type(e)}")
+            import traceback
+            print(f"❌ TRACEBACK: {traceback.format_exc()}")
+            print("=" * 60)
+            
+            return Response({
+                'success': False,
+                'error': f'Erreur lors du paiement: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 # ViewSets similaires pour les autres modèles...
 class RemboursementViewSet(viewsets.ModelViewSet):

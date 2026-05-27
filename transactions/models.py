@@ -872,12 +872,17 @@ class Renflouement(models.Model):
     @property
     def montant_restant(self):
         """Calcule le montant restant à payer"""
-        return self.montant_du - self.montant_paye
+        montant_du = self.montant_du or Decimal('0')
+        montant_paye = self.montant_paye or Decimal('0')
+        return montant_du - montant_paye
     
     @property
     def is_solde(self):
         """Vérifie si le renflouement est soldé"""
+        if self.montant_du is None:
+            return False
         return self.montant_paye >= self.montant_du
+
     
     @property
     def pourcentage_paye(self):

@@ -49,6 +49,10 @@ urlpatterns = [
         views.RepartitionRenflouementExerciceViewSet.as_view({'post': 'calculer_renflouements'}), 
         name='calculer-renflouements'),
     
+    path('renflouements/<uuid:pk>/payer_avec_epargne/',
+        views.RenflouementViewSet.as_view({'post': 'payer_avec_epargne'}),
+        name='payer-renflouement-epargne'),
+    
     path('renflouements-proportionnels/proportionnels/', 
         views.RenflouementProportionnelViewSet.as_view({'get': 'proportionnels'}), 
         name='renflouements-proportionnels'),

@@ -553,7 +553,8 @@ class Exercice(models.Model):
         try:
             with transaction.atomic():
                 # 1. Calculer les sorties à partir des DépenseExercice
-                from transactions.models import DépenseExercice
+                # (DépenseExercice est défini localement dans ce fichier)
+
                 
                 # Les sorties incluent TOUTES les dépenses de l'exercice
                 sorties_total = DépenseExercice.objects.filter(
