@@ -1,10 +1,12 @@
 from django.contrib import admin
 from django.db.models import Sum
 from django.utils.html import format_html
+from django.core.exceptions import ValidationError
+from django.utils import timezone  # ← AJOUTE CETTE LIGNE
 from .models import (
     PaiementInscription, PaiementSolidarite, EpargneTransaction,
     Emprunt, Remboursement, AssistanceAccordee, Renflouement,
-    PaiementRenflouement
+    PaiementRenflouement, RetraitEpargne
 )
 
 @admin.register(PaiementInscription)
@@ -430,7 +432,49 @@ class PaiementRenflouementAdmin(admin.ModelAdmin):
         return obj.session.nom
     session_nom.short_description = 'Session'
     
-    
+@admin.register(RetraitEpargne)
+class RetraitEpargneAdmin(admin.ModelAdmin):
+    list_display = ['membre', 'montant', 'statut', 'date_demande', 'date_traitement']
+    list_filter = ['statut', 'session']
+    search_fields = ['membre__numero_membre']
+    readonly_fields = ['date_demande', 'date_traitement', 'epargne_transaction']
+
+    def save_model(self, request, obj, form, change):
+        ancien_statut = None
+        if change:
+            ancien = RetraitEpargne.objects.get(pk=obj.pk)
+            ancien_statut = ancien.statut
+        
+        # Gérer l'approbation : soit création directe en APPROUVE, soit passage de EN_ATTENTE à APPROUVE
+        doit_approuver = (
+            obj.statut == 'APPROUVE' and
+            (not change or ancien_statut == 'EN_ATTENTE') and
+            not obj.epargne_transaction
+        )
+
+        if doit_approuver:
+            epargne_dispo = obj.membre.calculer_epargne_pure()
+            if obj.montant > epargne_dispo:
+                self.message_user(
+                    request,
+                    f"❌ Épargne insuffisante. Disponible : {epargne_dispo:,.0f} FCFA, "
+                    f"Demandé : {obj.montant:,.0f} FCFA.",
+                    level='ERROR'
+                )
+                return
+            epargne_tx = EpargneTransaction.objects.create(
+                membre=obj.membre,
+                type_transaction='RETRAIT_EPARGNE',
+                montant=-obj.montant,
+                session=obj.session,
+                notes=f"Retrait épargne approuvé – Demande #{obj.id}",
+            )
+            obj.epargne_transaction = epargne_tx
+            obj.date_traitement = timezone.now()
+
+        super().save_model(request, obj, form, change)
+
+  
     
     
 

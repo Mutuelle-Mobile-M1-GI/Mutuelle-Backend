@@ -190,19 +190,17 @@ class EpargneTransaction(models.Model):
         ('RETRAIT_PRET', 'Retrait pour prêt'),
         ('AJOUT_INTERET', 'Ajout d\'intérêt'),
         ('RETOUR_REMBOURSEMENT', 'Retour de remboursement'),
+        ('RETRAIT_EPARGNE', 'Retrait épargne'),  # ← AJOUTE CETTE LIGNE
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    membre = models.ForeignKey(Membre, on_delete=models.CASCADE, related_name='transactions_epargne')
+    membre = models.ForeignKey('core.Membre', on_delete=models.CASCADE, related_name='transactions_epargne')
     type_transaction = models.CharField(max_length=20, choices=TYPE_CHOICES, verbose_name="Type de transaction")
-    montant = models.DecimalField(
-        max_digits=12, decimal_places=2,
-        verbose_name="Montant (FCFA)"
-    )
-    session = models.ForeignKey(Session, on_delete=models.CASCADE, related_name='transactions_epargne')
+    montant = models.DecimalField(max_digits=12, decimal_places=2, verbose_name="Montant (FCFA)")
+    session = models.ForeignKey('core.Session', on_delete=models.CASCADE, related_name='transactions_epargne')
     date_transaction = models.DateTimeField(auto_now_add=True, verbose_name="Date de transaction")
     notes = models.TextField(blank=True, verbose_name="Notes")
-    
+
     class Meta:
         verbose_name = "Transaction d'épargne"
         verbose_name_plural = "Transactions d'épargne"
@@ -211,8 +209,106 @@ class EpargneTransaction(models.Model):
     def __str__(self):
         signe = "+" if self.montant >= 0 else ""
         return f"{self.membre.numero_membre} - {self.get_type_transaction_display()} - {signe}{self.montant:,.0f} FCFA"
+# ============================================================
+# À AJOUTER dans transactions/models.py
+# (après la classe EpargneTransaction)
+# ============================================================
 
+class RetraitEpargne(models.Model):
+    """
+    Demande de retrait sur l'épargne personnelle d'un membre.
+    Le membre ne peut retirer qu'un montant <= à son épargne disponible.
+    Lorsque le retrait est APPROUVÉ, une EpargneTransaction négative
+    est créée automatiquement pour déduire l'épargne.
+    """
 
+    STATUT_CHOICES = [
+        ('EN_ATTENTE', 'En attente'),
+        ('APPROUVE',   'Approuvé'),
+        ('REJETE',     'Rejeté'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    membre = models.ForeignKey(
+        'core.Membre',
+        on_delete=models.CASCADE,
+        related_name='retraits_epargne',
+        verbose_name='Membre',
+    )
+    session = models.ForeignKey(
+        'core.Session',
+        on_delete=models.CASCADE,
+        related_name='retraits_epargne',
+        verbose_name='Session',
+    )
+    montant = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('1'))],
+        verbose_name='Montant du retrait (FCFA)',
+    )
+    statut = models.CharField(
+        max_length=20,
+        choices=STATUT_CHOICES,
+        default='EN_ATTENTE',
+        verbose_name='Statut',
+    )
+    motif = models.TextField(blank=True, verbose_name='Motif du retrait')
+    notes_admin = models.TextField(blank=True, verbose_name="Notes de l'administrateur")
+
+    date_demande    = models.DateTimeField(auto_now_add=True, verbose_name='Date de la demande')
+    date_traitement = models.DateTimeField(null=True, blank=True, verbose_name='Date de traitement')
+
+    # Lien vers l'EpargneTransaction créée lors de l'approbation
+    # Lien vers l'EpargneTransaction créée lors de l'approbation
+    # Forcez Django à chercher le modèle dans l'application globale 'transactions'
+    epargne_transaction = models.OneToOneField(
+        'transactions.EpargneTransaction',  # Utilisez le préfixe de l'app en minuscules obligatoirement
+        on_delete=models.SET_NULL,
+        null=True, 
+        blank=True,
+        related_name='retrait_source',
+        verbose_name="Transaction d'épargne liée",
+    )
+    class Meta:
+        verbose_name         = "Retrait d'épargne"
+        verbose_name_plural  = "Retraits d'épargne"
+        ordering             = ['-date_demande']
+
+    def __str__(self):
+        return (
+            f"{self.membre.numero_membre} – Retrait {self.montant:,.0f} FCFA "
+            f"[{self.get_statut_display()}]"
+        )
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        if self.pk:
+            ancien = RetraitEpargne.objects.filter(pk=self.pk).first()
+            if ancien and ancien.statut == 'EN_ATTENTE' and self.statut == 'APPROUVE':
+                epargne_dispo = self.membre.calculer_epargne_pure()
+                if self.montant > epargne_dispo:
+                    raise ValidationError(
+                        f"Épargne insuffisante. Disponible : {epargne_dispo:,.0f} FCFA, "
+                        f"Demandé : {self.montant:,.0f} FCFA."
+                    )
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            ancien = RetraitEpargne.objects.filter(pk=self.pk).first()
+            if ancien and ancien.statut == 'EN_ATTENTE' and self.statut == 'APPROUVE':
+                from django.utils import timezone
+                if not self.epargne_transaction:
+                    epargne_tx = EpargneTransaction.objects.create(
+                        membre=self.membre,
+                        type_transaction='RETRAIT_PRET',
+                        montant=-self.montant,
+                        session=self.session,
+                        notes=f"Retrait épargne approuvé – Demande #{self.id}",
+                    )
+                    self.epargne_transaction = epargne_tx
+                    self.date_traitement = timezone.now()
+        super().save(*args, **kwargs)
 
 
 class Emprunt(models.Model):
@@ -968,237 +1064,3 @@ class PaiementRenflouement(models.Model):
         except :
             print(f"Erreur de calcul de sttus en regle  ")
             pass
-                
-from logging import config
-from django.db import models
-from django.core.validators import MinValueValidator
-from django.conf import settings
-from decimal import Decimal, ROUND_HALF_UP
-import uuid
-from django.db import transaction
-from core.models import Membre, Session, Exercice, TypeAssistance, Interet, FondsSocial, CaisseInscription
-from decimal import Decimal, ROUND_HALF_UP
-from django.db.models import Sum, Q
-from django.utils import timezone
-import uuid
-from datetime import date, timedelta
-from django.db import models
-from django.core.validators import MinValueValidator
-from django.utils import timezone
-
-class PaiementInscription(models.Model):
-    """
-    Paiement d'inscription en une seule tranche par membre.
-    Les montants vont dans la caisse inscription (plus dans le fonds social).
-    """
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    membre = models.ForeignKey(Membre, on_delete=models.CASCADE, related_name='paiements_inscription')
-    montant = models.DecimalField(
-        max_digits=12, decimal_places=2,
-        validators=[MinValueValidator(0)],
-        verbose_name="Montant payé (FCFA)"
-    )
-    montant_inscription_du = models.DecimalField(
-        max_digits=12, decimal_places=2,
-        validators=[MinValueValidator(0)],
-        verbose_name="Montant total dû pour l'inscription (FCFA)",
-        help_text="Montant configuré au moment de l'inscription du membre"
-    )
-    date_paiement = models.DateTimeField(auto_now_add=True, verbose_name="Date de paiement")
-    session = models.ForeignKey(Session, on_delete=models.CASCADE, related_name='paiements_inscription', verbose_name="Session")
-    notes = models.TextField(blank=True, verbose_name="Notes")
-
-    class Meta:
-        verbose_name = "Paiement d'inscription"
-        verbose_name_plural = "Paiements d'inscription"
-        ordering = ['-date_paiement']
-        constraints = [
-            models.UniqueConstraint(fields=['membre'], name='unique_paiement_inscription_par_membre'),
-        ]
-
-    def save(self, *args, **kwargs):
-        """
-        - Un seul paiement d'inscription par membre (contrainte unique).
-        - Alimente la caisse inscription uniquement avec la partie DUE.
-        - Surplus éventuel versé en épargne personnelle (sans doubler en caisse).
-        """
-        from core.models import ConfigurationMutuelle
-
-        with transaction.atomic():
-            is_new = getattr(self._state, 'adding', True)
-
-            if is_new and PaiementInscription.objects.filter(membre=self.membre).exists():
-                from django.core.exceptions import ValidationError
-                raise ValidationError(
-                    "Ce membre a déjà un paiement d'inscription. L'inscription se fait en une seule tranche."
-                )
-
-            # 1) Montant dû = config (une seule tranche)
-            if is_new:
-                config = ConfigurationMutuelle.get_configuration()
-                self.montant_inscription_du = config.montant_inscription
-                print(f"📝 Paiement inscription (une tranche): montant dû = {self.montant_inscription_du}")
-
-            # 2) Surplus éventuel (avec une tranche: restant_avant = montant_du)
-            surplus_pour_epargne = Decimal('0')
-            montant_pour_caisse = Decimal('0')
-            if is_new and self.montant and self.montant > 0:
-                montant_du = self.montant_inscription_du
-                # Part qui règle l'inscription (max = montant_du)
-                montant_pour_caisse = min(self.montant, montant_du)
-                if self.montant > montant_du:
-                    surplus_pour_epargne = self.montant - montant_du
-                    print(
-                        f"💰 Surplus inscription pour {self.membre.numero_membre} : "
-                        f"{surplus_pour_epargne} FCFA (sera versé en épargne)"
-                    )
-
-            # 3) Sauvegarde du paiement
-            super().save(*args, **kwargs)
-
-            # 4) Alimenter la caisse inscription UNIQUEMENT avec la partie due
-            if is_new and montant_pour_caisse and montant_pour_caisse > 0:
-                try:
-                    caisse = CaisseInscription.get_caisse_actuelle()
-                    if caisse:
-                        desc = f"Inscription {self.membre.numero_membre} - Session {self.session.nom}"
-                        caisse.ajouter_montant(montant_pour_caisse, description=desc)
-                    else:
-                        print("Aucune caisse inscription actuelle trouvée")
-                except Exception as e:
-                    print(f"Erreur alimentation caisse inscription: {e}")
-
-            # 5) Mettre à jour inscription_terminee
-            if is_new:
-                self.membre.update_inscription_terminee()
-                self.membre.save()
-
-            # 6) Surplus vers épargne personnelle
-            if is_new and surplus_pour_epargne > 0:
-                try:
-                    EpargneTransaction.objects.create(
-                        membre=self.membre,
-                        type_transaction='DEPOT',
-                        montant=surplus_pour_epargne,
-                        session=self.session,
-                        notes="Surplus paiement inscription"
-                    )
-                    print(
-                        f"✅ Surplus {surplus_pour_epargne} FCFA ajouté à l'épargne de {self.membre.numero_membre}"
-                    )
-                except Exception as e:
-                    print(f"❌ Erreur épargne surplus inscription: {e}")
-
-    def __str__(self):
-        return f"{self.membre.numero_membre} - {self.montant:,.0f} FCFA ({self.date_paiement.date()})"
-    
-class PaiementSolidarite(models.Model):
-    """
-    Paiements de solidarité (fonds social) par session
-    """
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    membre = models.ForeignKey(Membre, on_delete=models.CASCADE, related_name='paiements_solidarite')
-    session = models.ForeignKey(Session, on_delete=models.CASCADE, related_name='paiements_solidarite')
-    montant = models.DecimalField(
-        max_digits=12, decimal_places=2,
-        validators=[MinValueValidator(0)],
-        verbose_name="Montant payé (FCFA)"
-    )
-    # ✅ NOUVEAU CHAMP pour stocker le montant total de la solidarite que le membre va devoir payer
-    montant_solidarite_du = models.DecimalField(
-        max_digits=12, decimal_places=2,
-        validators=[MinValueValidator(0)],
-        verbose_name="Montant dû pour cette session (FCFA)",
-        help_text="Montant configuré au moment du paiement de cette session"
-    )
-    date_paiement = models.DateTimeField(auto_now_add=True, verbose_name="Date de paiement")
-    notes = models.TextField(blank=True, verbose_name="Notes")
-    
-    class Meta:
-        verbose_name = "Paiement de solidarité"
-        verbose_name_plural = "Paiements de solidarité"
-        ordering = ['-date_paiement']
-        # ❌ RETIRER unique_together car on peut payer en plusieurs fois
-        # unique_together = [['membre', 'session']]
-        
-    def save(self, *args, **kwargs):
-        # Sauvegarde et alimentation du fonds social en transaction
-        with transaction.atomic():
-            is_new = getattr(self, '_state', None) and getattr(self._state, 'adding', True)
-            super().save(*args, **kwargs)
-
-            if is_new and self.montant and self.montant > 0:
-                try:
-                    fonds = FondsSocial.get_fonds_actuel()
-                    if fonds:
-                        desc = f"Solidarité {self.membre.numero_membre} - Session {self.session.nom}"
-                        fonds.ajouter_montant(self.montant, description=desc)
-                        print(f"Debug: ajout effectué {self.montant}")
-                    else:
-                        print("Aucun fonds social actuel trouvé pour enregistrer la solidarité.")
-                except Exception as e:
-                    print(f"Erreur lors de l'alimentation du fonds social: {e}")
-                    
-            is_new = self.pk is None
-
-            # ✅ LOGIC AMÉLIORÉE: Enregistrer le montant dû au moment du paiement
-            if is_new and not self.montant_solidarite_du:
-                from core.models import ConfigurationMutuelle
-                config = ConfigurationMutuelle.get_configuration()
-                self.montant_solidarite_du = config.montant_solidarite
-                print(f"💰 Solidarité session {self.session.nom}: montant dû = {self.montant_solidarite_du}")
-
-            # ✅ CORRECTION: Ne mettre à jour le statut que si on peut définir les statuts (≥3 sessions)
-            try:
-                from core.models import Membre
-                peut_definir_statuts = Membre.peut_definir_statuts_membre(membre=self.membre)
-
-                if peut_definir_statuts and self.membre.calculer_statut_en_regle():
-                    self.membre.statut = 'EN_REGLE'
-                    self.membre.save()
-                elif peut_definir_statuts:
-                    # Si on peut définir les statuts mais membre n'est pas en règle
-                    self.membre.statut = 'NON_EN_REGLE'
-                    self.membre.save()
-            except Exception as e:
-                print(f"Erreur de calcul de statut en règle: {e}")
-                pass
-        
-    
-    def __str__(self):
-        return f"{self.membre.numero_membre} - Session {self.session.nom} - {self.montant:,.0f} FCFA"
-
-class EpargneTransaction(models.Model):
-    """
-    Transactions d'épargne (dépôts et retraits pour prêts)
-    """
-    TYPE_CHOICES = [
-        ('DEPOT', 'Dépôt'),
-        ('RETRAIT_PRET', 'Retrait pour prêt'),
-        ('AJOUT_INTERET', 'Ajout d\'intérêt'),
-        ('RETOUR_REMBOURSEMENT', 'Retour de remboursement'),
-    ]
-    
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    membre = models.ForeignKey(Membre, on_delete=models.CASCADE, related_name='transactions_epargne')
-    type_transaction = models.CharField(max_length=20, choices=TYPE_CHOICES, verbose_name="Type de transaction")
-    montant = models.DecimalField(
-        max_digits=12, decimal_places=2,
-        verbose_name="Montant (FCFA)"
-    )
-    session = models.ForeignKey(Session, on_delete=models.CASCADE, related_name='transactions_epargne')
-    date_transaction = models.DateTimeField(auto_now_add=True, verbose_name="Date de transaction")
-    notes = models.TextField(blank=True, verbose_name="Notes")
-    
-    class Meta:
-        verbose_name = "Transaction d'épargne"
-        verbose_name_plural = "Transactions d'épargne"
-        ordering = ['-date_transaction']
-    
-    def __str__(self):
-        signe = "+" if self.montant >= 0 else ""
-        return f"{self.membre.numero_membre} - {self.get_type_transaction_display()} - {signe}{self.montant:,.0f} FCFA"
-
-
-
-

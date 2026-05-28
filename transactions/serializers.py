@@ -127,6 +127,114 @@ class EpargneTransactionSerializer(serializers.ModelSerializer):
         # ou on s'assure qu'elle ne bloque pas la création.
         return super().create(validated_data)
 
+
+# ============================================================
+# À AJOUTER dans transactions/serializers.py
+# (après EpargneTransactionSerializer)
+# ============================================================
+
+from .models import RetraitEpargne
+
+class RetraitEpargneSerializer(serializers.ModelSerializer):
+    """
+    Serializer pour les retraits d'épargne.
+
+    - En création  : seuls `membre`, `session`, `montant` et `motif` sont requis.
+    - En mise à jour : le champ `statut` permet à l'admin d'approuver / rejeter.
+    - `epargne_disponible` est calculé à la volée pour informer le frontend.
+    """
+
+    # Champs lecture seule enrichis
+    membre_info              = serializers.SerializerMethodField(read_only=True)
+    session_nom              = serializers.CharField(source='session.nom', read_only=True)
+    statut_display           = serializers.CharField(source='get_statut_display', read_only=True)
+    epargne_disponible       = serializers.SerializerMethodField(read_only=True)
+    epargne_transaction_info = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model  = RetraitEpargne
+        fields = [
+            'id',
+            'membre', 'membre_info',
+            'session', 'session_nom',
+            'montant',
+            'statut', 'statut_display',
+            'motif',
+            'notes_admin',
+            'date_demande', 'date_traitement',
+            'epargne_disponible',
+            'epargne_transaction', 'epargne_transaction_info',
+        ]
+        read_only_fields = [
+            'id', 'date_demande', 'date_traitement',
+            'epargne_transaction',
+        ]
+        extra_kwargs = {
+            'motif':       {'required': False, 'allow_blank': True},
+            'notes_admin': {'required': False, 'allow_blank': True},
+        }
+
+    # ------------------------------------------------------------------ #
+    # Champs calculés                                                      #
+    # ------------------------------------------------------------------ #
+
+    def get_membre_info(self, obj):
+        m = obj.membre
+        nom = "Inconnu"
+        if m.utilisateur:
+            nom = (
+                getattr(m.utilisateur, 'nom_complet', None)
+                or f"{m.utilisateur.first_name} {m.utilisateur.last_name}".strip()
+                or m.utilisateur.username
+            )
+        return {
+            "id":             str(m.id),
+            "numero_membre":  m.numero_membre,
+            "nom":            nom,
+        }
+
+    def get_epargne_disponible(self, obj):
+        return float(obj.membre.calculer_epargne_pure())
+
+    def get_epargne_transaction_info(self, obj):
+        if not obj.epargne_transaction:
+            return None
+        t = obj.epargne_transaction
+        return {
+            "id":     str(t.id),
+            "montant": float(t.montant),
+            "date":   t.date_transaction.isoformat(),
+        }
+
+    # ------------------------------------------------------------------ #
+    # Validation                                                           #
+    # ------------------------------------------------------------------ #
+
+    def validate(self, attrs):
+        membre  = attrs.get('membre')  or getattr(self.instance, 'membre', None)
+        montant = attrs.get('montant') or getattr(self.instance, 'montant', Decimal('0'))
+        statut  = attrs.get('statut')  or getattr(self.instance, 'statut', 'EN_ATTENTE')
+
+        # Lors d'une création ou modification du montant, vérifier la disponibilité
+        if membre and montant and statut != 'REJETE':
+            epargne_dispo = membre.calculer_epargne_pure()
+            if montant > epargne_dispo:
+                raise serializers.ValidationError({
+                    "montant": (
+                        f"Le montant demandé ({montant:,.0f} FCFA) dépasse "
+                        f"l'épargne disponible ({epargne_dispo:,.0f} FCFA)."
+                    )
+                })
+
+        # Empêcher de modifier un retrait déjà traité
+        if self.instance and self.instance.statut in ('APPROUVE', 'REJETE'):
+            if 'montant' in attrs and attrs['montant'] != self.instance.montant:
+                raise serializers.ValidationError(
+                    "Impossible de modifier le montant d'un retrait déjà traité."
+                )
+
+        return attrs
+
 class EmpruntSerializer(serializers.ModelSerializer):
     """
     Serializer pour les emprunts AVEC TOUS LES CALCULS et validations

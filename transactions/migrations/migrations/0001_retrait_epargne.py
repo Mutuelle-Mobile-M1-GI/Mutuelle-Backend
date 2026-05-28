@@ -1,0 +1,83 @@
+from django.db import migrations, models
+import django.core.validators
+import django.db.models.deletion
+import uuid
+
+
+class Migration(migrations.Migration):
+
+    dependencies = [
+        ('transactions', '0008_unique_paiement_inscription_par_membre'),
+    ]
+
+    operations = [
+        migrations.CreateModel(
+            name='RetraitEpargne',
+            fields=[
+                ('id', models.UUIDField(
+                    default=uuid.uuid4,
+                    editable=False,
+                    primary_key=True,
+                    serialize=False
+                )),
+                ('montant', models.DecimalField(
+                    decimal_places=2,
+                    max_digits=12,
+                    validators=[django.core.validators.MinValueValidator(1)],
+                    verbose_name='Montant du retrait (FCFA)'
+                )),
+                ('statut', models.CharField(
+                    choices=[
+                        ('EN_ATTENTE', 'En attente'),
+                        ('APPROUVE', 'Approuvé'),
+                        ('REJETE', 'Rejeté'),
+                    ],
+                    default='EN_ATTENTE',
+                    max_length=20,
+                    verbose_name='Statut'
+                )),
+                ('motif', models.TextField(
+                    blank=True,
+                    verbose_name='Motif du retrait'
+                )),
+                ('notes_admin', models.TextField(
+                    blank=True,
+                    verbose_name="Notes de l'administrateur"
+                )),
+                ('date_demande', models.DateTimeField(
+                    auto_now_add=True,
+                    verbose_name='Date de la demande'
+                )),
+                ('date_traitement', models.DateTimeField(
+                    blank=True,
+                    null=True,
+                    verbose_name='Date de traitement'
+                )),
+                ('membre', models.ForeignKey(
+                    on_delete=django.db.models.deletion.CASCADE,
+                    related_name='retraits_epargne',
+                    to='core.membre',
+                    verbose_name='Membre'
+                )),
+                ('session', models.ForeignKey(
+                    on_delete=django.db.models.deletion.CASCADE,
+                    related_name='retraits_epargne',
+                    to='core.session',
+                    verbose_name='Session'
+                )),
+                ('epargne_transaction', models.OneToOneField(
+                    blank=True,
+                    null=True,
+                    on_delete=django.db.models.deletion.SET_NULL,
+                    related_name='retrait_source',
+                    to='transactions.epargnetransaction',
+                    verbose_name="Transaction d'épargne liée"
+                )),
+            ],
+            options={
+                'verbose_name': "Retrait d'épargne",
+                'verbose_name_plural': "Retraits d'épargne",
+                'ordering': ['-date_demande'],
+            },
+        ),
+    ]
