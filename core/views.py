@@ -5,13 +5,14 @@ from rest_framework.permissions import AllowAny
 from django_filters import rest_framework as filters
 from django.db import models
 from .models import (
-    ConfigurationMutuelle, Exercice, Session, TypeAssistance, 
-    Membre, FondsSocial, EmpruntCoefficientTier
+    ConfigurationMutuelle, Exercice, Session, TypeAssistance,
+    Membre, FondsSocial, CaisseInscription, EmpruntCoefficientTier
 )
 from .serializers import (
     ConfigurationMutuelleSerializer, ExerciceSerializer, SessionSerializer,
     TypeAssistanceSerializer, MembreSerializer, FondsSocialSerializer,
-    DonneesAdministrateurSerializer,EmpruntCoefficientTierSerializer
+    CaisseInscriptionSerializer, DonneesAdministrateurSerializer,
+    EmpruntCoefficientTierSerializer, SessionDepenseSerializer
 )
 from .utils import calculer_donnees_administrateur
 from authentication.permissions import IsAdministrateur, IsAdminOrReadOnly
@@ -129,6 +130,72 @@ class ExerciceViewSet(viewsets.ModelViewSet):
             serializer = self.get_serializer(exercice)
             return Response(serializer.data)
         return Response({'detail': 'Aucun exercice en cours'}, status=404)
+    
+    @action(detail=True, methods=['patch'], permission_classes=[IsAdminOrReadOnly])
+    def update_params(self, request, pk=None):
+        """
+        Modifie les paramètres simples d'un exercice en cours
+        Paramètres autorisés: nom, description, date_debut, date_fin
+        """
+        exercice = self.get_object()
+        
+        # Vérifier que c'est un exercice en cours
+        if exercice.statut != 'EN_COURS':
+            return Response({
+                'error': 'Impossible de modifier cet exercice',
+                'details': f'Seuls les exercices EN_COURS peuvent être modifiés. Statut actuel: {exercice.statut}'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Paramètres autorisés
+        allowed_fields = ['nom', 'description', 'date_debut', 'date_fin']
+        
+        # Mettre à jour les champs fournis
+        updated = False
+        for field in allowed_fields:
+            if field in request.data:
+                setattr(exercice, field, request.data[field])
+                updated = True
+        
+        if not updated:
+            return Response({
+                'error': 'Aucun paramètre valide fourni',
+                'details': f'Paramètres autorisés: {", ".join(allowed_fields)}'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        exercice.save()
+        serializer = self.get_serializer(exercice)
+        
+        return Response({
+            'message': 'Exercice modifié avec succès',
+            'data': serializer.data
+        }, status=status.HTTP_200_OK)
+    
+    def destroy(self, request, *args, **kwargs):
+        """
+        Suppression sécurisée d'un exercice
+        Vérifie qu'aucune session n'est rattachée
+        (car toutes les opérations se font au niveau des sessions)
+        """
+        exercice = self.get_object()
+        
+        # Vérifier s'il y a des sessions rattachées
+        nb_sessions = exercice.sessions.count()
+        
+        if nb_sessions > 0:
+            return Response({
+                'error': 'Impossible de supprimer cet exercice',
+                'details': 'Des sessions sont rattachées à cet exercice. Supprimez d\'abord les sessions.',
+                'sessions_count': nb_sessions
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Aucune session, suppression autorisée
+        exercice_nom = exercice.nom
+        exercice.delete()
+        
+        return Response({
+            'message': f'Exercice "{exercice_nom}" supprimé avec succès',
+            'details': 'Aucune session n\'était rattachée à cet exercice'
+        }, status=status.HTTP_200_OK)
 
 class SessionFilter(filters.FilterSet):
     """
@@ -206,46 +273,23 @@ class SessionViewSet(viewsets.ModelViewSet):
         """
         Personnalisé : appelé APRÈS la validation, AVANT la sauvegarde lors d'un POST
         
-        Respecte la logique complète de Session.save() du modèle :
-        1. Auto-génère le nom si pas fourni
-        2. Assigne l'exercice en cours si pas fourni
-        3. Gère les sessions EN_COURS (une seule par exercice)
-        4. Traite la collation si montant > 0 et statut = EN_COURS
+        Gère la transition des sessions EN_COURS
         """
-        print("=" * 100)
-        print("🔍 CRÉATION DE SESSION - perform_create()")
-        print(f"📡 Données reçues: {serializer.validated_data}")
-        print("=" * 50)
+        validated_data = serializer.validated_data
+        statut = validated_data.get('statut', 'EN_COURS')
+        exercice = validated_data.get('exercice')
         
-        # Vérifier que l'exercice est assigné
-        if 'exercice' not in serializer.validated_data or not serializer.validated_data.get('exercice'):
-            exercice_actuel = Exercice.get_exercice_en_cours()
-            if exercice_actuel:
-                serializer.validated_data['exercice'] = exercice_actuel
-                print(f"✅ Exercice auto-assigné: {exercice_actuel.nom}")
-            else:
-                print("⚠️ ATTENTION: Aucun exercice en cours trouvé")
+        # Si on crée une nouvelle session en mode EN_COURS
+        if statut == 'EN_COURS' and exercice:
+            # Clôturer l'ancienne session en cours pour cet exercice
+            Session.objects.filter(
+                exercice=exercice, 
+                statut='EN_COURS'
+            ).update(statut='TERMINEE')
+            print(f"✅ Ancienne session EN_COURS clôturée pour {exercice.nom}")
         
-        # Laisser le modèle.save() gérer toute la logique métier
-        # (nom auto-généré, gestion sessions EN_COURS, collation, renflouements, etc.)
-        print("✅ Appel de serializer.save() → Session.save() du modèle prendra le relais")
-        try:
-            serializer.save()
-            
-            print(f"✅ Session créée avec succès:")
-            print(f"   - Nom: {serializer.instance.nom}")
-            print(f"   - Exercice: {serializer.instance.exercice.nom}")
-            print(f"   - Statut: {serializer.instance.statut}")
-            print(f"   - Collation: {serializer.instance.montant_collation}")
-            print("=" * 100)
-        except Exception as e:
-            print(f"❌ ERREUR CRÉATION SESSION: {e}")
-            print("=" * 100)
-            # ✅ Relancer l'exception pour que DRF la gère correctement
-            from rest_framework.exceptions import ValidationError
-            raise ValidationError({
-                'detail': str(e)
-            })
+        # Sauvegarder la nouvelle session
+        serializer.save()
     
     @action(detail=False, methods=['get'], permission_classes=[AllowAny])
     def current(self, request):
@@ -257,6 +301,191 @@ class SessionViewSet(viewsets.ModelViewSet):
             serializer = self.get_serializer(session)
             return Response(serializer.data)
         return Response({'detail': 'Aucune session en cours'}, status=404)
+    
+    @action(detail=True, methods=['patch'], permission_classes=[IsAdminOrReadOnly])
+    def clore(self, request, pk=None):
+        """
+        Clore une session EN_COURS en la passant au statut TERMINEE
+        """
+        session = self.get_object()
+        
+        # Vérifier que c'est une session en cours
+        if session.statut != 'EN_COURS':
+            return Response({
+                'error': 'Impossible de clore cette session',
+                'details': f'Seules les sessions EN_COURS peuvent être clôturées. Statut actuel: {session.statut}'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Passer le statut à TERMINEE
+        session.statut = 'TERMINEE'
+        session.save()
+        
+        serializer = self.get_serializer(session)
+        
+        return Response({
+            'message': f'Session "{session.nom}" clôturée avec succès',
+            'data': serializer.data
+        }, status=status.HTTP_200_OK)
+    
+    @action(detail=True, methods=['patch'], permission_classes=[IsAdminOrReadOnly])
+    def update_params(self, request, pk=None):
+        """
+        Modifie les paramètres simples d'une session en cours
+        Paramètres autorisés: nom, description, date_session, montant_collation
+        """
+        session = self.get_object()
+        
+        # Vérifier que c'est une session en cours
+        if session.statut != 'EN_COURS':
+            return Response({
+                'error': 'Impossible de modifier cette session',
+                'details': f'Seules les sessions EN_COURS peuvent être modifiées. Statut actuel: {session.statut}'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Paramètres autorisés
+        allowed_fields = ['nom', 'description', 'date_session', 'montant_collation']
+        
+        # Mettre à jour les champs fournis
+        updated = False
+        for field in allowed_fields:
+            if field in request.data:
+                setattr(session, field, request.data[field])
+                updated = True
+        
+        if not updated:
+            return Response({
+                'error': 'Aucun paramètre valide fourni',
+                'details': f'Paramètres autorisés: {", ".join(allowed_fields)}'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        session.save()
+        serializer = self.get_serializer(session)
+        
+        return Response({
+            'message': 'Session modifiée avec succès',
+            'data': serializer.data
+        }, status=status.HTTP_200_OK)
+    
+    @action(detail=False, methods=['get'], permission_classes=[AllowAny], url_path='depenses')
+    def depenses(self, request):
+        """
+        Retourne la liste des dépenses de session (collation + autres dépenses).
+
+        Filtres optionnels (query params) :
+        - exercice (UUID) : filtrer par exercice
+        - session  (UUID) : filtrer une session précise
+        - type     : 'collation' | 'autre' | 'all' (défaut : 'all')
+        """
+        from decimal import Decimal
+        from django.db.models import Sum
+
+        qs = Session.objects.select_related('exercice').all()
+
+        # Filtre par exercice
+        exercice_id = request.query_params.get('exercice')
+        if exercice_id:
+            qs = qs.filter(exercice__id=exercice_id)
+
+        # Filtre par session précise
+        session_id = request.query_params.get('session')
+        if session_id:
+            qs = qs.filter(id=session_id)
+
+        # Filtre par type de dépense
+        type_depense = request.query_params.get('type', 'all')
+        if type_depense == 'collation':
+            qs = qs.filter(montant_collation__gt=0)
+        elif type_depense == 'autre':
+            qs = qs.filter(montant_autre_depense__gt=0)
+        # 'all' → pas de filtre supplémentaire
+
+        # Agréger les totaux
+        totaux = qs.aggregate(
+            total_collation=Sum('montant_collation'),
+            total_autre_depense=Sum('montant_autre_depense'),
+        )
+        total_collation = totaux['total_collation'] or Decimal('0')
+        total_autre_depense = totaux['total_autre_depense'] or Decimal('0')
+
+        serializer = SessionDepenseSerializer(qs, many=True)
+
+        return Response({
+            'total_collation': total_collation,
+            'total_autre_depense': total_autre_depense,
+            'total_general': total_collation + total_autre_depense,
+            'nombre_sessions': qs.count(),
+            'depenses': serializer.data,
+        })
+
+    def destroy(self, request, *args, **kwargs):
+        """
+        Suppression sécurisée d'une session
+        Vérifie qu'aucune opération n'a été effectuée
+        """
+        session = self.get_object()
+        
+        # Vérifier s'il y a des opérations liées
+        from transactions.models import (
+            PaiementInscription, PaiementSolidarite, 
+            EpargneTransaction, Emprunt, Renflouement
+        )
+        
+        # Compter les opérations
+        nb_paiements_inscription = PaiementInscription.objects.filter(
+            session=session
+        ).count()
+        
+        nb_paiements_solidarite = PaiementSolidarite.objects.filter(
+            session=session
+        ).count()
+        
+        nb_epargnes = EpargneTransaction.objects.filter(
+            session=session
+        ).count()
+        
+        nb_emprunts = Emprunt.objects.filter(
+            session_emprunt=session
+        ).count()
+        
+        nb_renflouements = Renflouement.objects.filter(
+            session=session
+        ).count()
+        
+        nb_membres = session.nouveaux_membres.count()
+        
+        # Vérifier s'il y a des opérations
+        total_operations = (
+            nb_paiements_inscription + 
+            nb_paiements_solidarite + 
+            nb_epargnes + 
+            nb_emprunts + 
+            nb_renflouements +
+            nb_membres
+        )
+        
+        if total_operations > 0:
+            return Response({
+                'error': 'Impossible de supprimer cette session',
+                'details': 'Des opérations ont déjà été effectuées sur cette session',
+                'operations': {
+                    'paiements_inscription': nb_paiements_inscription,
+                    'paiements_solidarite': nb_paiements_solidarite,
+                    'epargnes': nb_epargnes,
+                    'emprunts': nb_emprunts,
+                    'renflouements': nb_renflouements,
+                    'membres_inscrits': nb_membres,
+                    'total': total_operations
+                }
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Aucune opération, suppression autorisée
+        session_nom = session.nom
+        session.delete()
+        
+        return Response({
+            'message': f'Session "{session_nom}" supprimée avec succès',
+            'details': 'Aucune opération n\'avait été effectuée sur cette session'
+        }, status=status.HTTP_200_OK)
 
 class MembreFilter(filters.FilterSet):
     """
@@ -406,6 +635,59 @@ class MembreViewSet(viewsets.ModelViewSet):
             'membres_suspendus': suspendus,
             'pourcentage_en_regle': (en_regle / total * 100) if total > 0 else 0
         })
+    
+    @action(detail=True, methods=['post'], permission_classes=[IsAdministrateur])
+    def desactiver(self, request, pk=None):
+        """
+        Désactive un membre (il ne recevra plus les intérêts redistribués)
+        """
+        membre = self.get_object()
+        
+        if not membre.actif:
+            return Response({
+                'error': 'Le membre est déjà désactivé'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Vérifier s'il a un emprunt en cours
+        from transactions.models import Emprunt
+        emprunt_en_cours = Emprunt.objects.filter(
+            membre=membre, 
+            statut__in=['EN_COURS', 'EN_RETARD']
+        ).exists()
+        
+        if emprunt_en_cours:
+            return Response({
+                'error': 'Impossible de désactiver un membre avec un emprunt en cours',
+                'details': 'Le membre doit d\'abord rembourser son emprunt'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        membre.actif = False
+        membre.save()
+        
+        return Response({
+            'message': f'Membre {membre.numero_membre} désactivé avec succès',
+            'membre': MembreSerializer(membre).data
+        })
+    
+    @action(detail=True, methods=['post'], permission_classes=[IsAdministrateur])
+    def activer(self, request, pk=None):
+        """
+        Réactive un membre désactivé
+        """
+        membre = self.get_object()
+        
+        if membre.actif:
+            return Response({
+                'error': 'Le membre est déjà actif'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        membre.actif = True
+        membre.save()
+        
+        return Response({
+            'message': f'Membre {membre.numero_membre} activé avec succès',
+            'membre': MembreSerializer(membre).data
+        })
 
 
 
@@ -460,6 +742,29 @@ class FondsSocialViewSet(viewsets.ReadOnlyModelViewSet):
             serializer = self.get_serializer(fonds)
             return Response(serializer.data)
         return Response({'detail': 'Aucun fonds social actuel'}, status=404)
+
+
+class CaisseInscriptionViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet pour la caisse inscription (lecture seule)
+    """
+    queryset = CaisseInscription.objects.select_related('exercice').all()
+    serializer_class = CaisseInscriptionSerializer
+    filterset_fields = ['exercice']
+    ordering = ['-date_modification']
+    permission_classes = [AllowAny]
+
+    @action(detail=False, methods=['get'], permission_classes=[AllowAny])
+    def current(self, request):
+        """
+        Retourne la caisse inscription actuelle (exercice en cours)
+        """
+        caisse = CaisseInscription.get_caisse_actuelle()
+        if caisse:
+            serializer = self.get_serializer(caisse)
+            return Response(serializer.data)
+        return Response({'detail': 'Aucune caisse inscription actuelle'}, status=404)
+
 
 @action(detail=False, methods=['get'], permission_classes=[IsAdministrateur])
 def donnees_administrateur(request):

@@ -43,12 +43,44 @@ def calculer_cumul_epargnes_total():
         'nombre_membres': membres_actifs.count()
     }
 
+
+def calculer_tresor_disponible():
+    """
+    ✅ NOUVEAU : Calcule les liquidités réellement disponibles dans le trésor
+    pour les emprunts (entrées - sorties)
+    """
+    from transactions.models import EpargneTransaction
+    from django.db.models import Sum
+    from decimal import Decimal
+    
+    TYPES_ENTREES_TRESOR = ['DEPOT', 'RETOUR_REMBOURSEMENT']
+    
+    total_entrees = EpargneTransaction.objects.filter(
+        type_transaction__in=TYPES_ENTREES_TRESOR,
+        montant__gt=0
+    ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+    
+    total_sorties = EpargneTransaction.objects.filter(
+        type_transaction='RETRAIT_PRET',
+        montant__lt=0
+    ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+    
+    tresor_disponible = total_entrees + total_sorties  # total_sorties est déjà négatif
+    
+    return {
+        'total_entrees': total_entrees,
+        'total_sorties': total_sorties,
+        'tresor_disponible': tresor_disponible,
+        'peut_emprunter': tresor_disponible > 0
+    }
+
 def calculer_donnees_administrateur():
     """
     Calcule toutes les données que l'administrateur doit voir
     """
     fonds_social = calculer_fonds_social_total()
     tresor = calculer_cumul_epargnes_total()
+    tresor_disponible = calculer_tresor_disponible()  # ✅ NOUVEAU
     
     # Calcul des montants attendus (emprunts en cours)
     from transactions.models import Emprunt
@@ -61,13 +93,16 @@ def calculer_donnees_administrateur():
     return {
         'fonds_social': fonds_social,
         'tresor': tresor,
+        'tresor_disponible': tresor_disponible,  # ✅ NOUVEAU
         'emprunts_en_cours': {
             'nombre': emprunts_en_cours.count(),
             'montant_total_attendu': montant_attendu_emprunts
         },
         'situation_globale': {
             'liquidites_totales': fonds_social['montant_total'] + tresor['cumul_total_epargnes'],
-            'engagements_totaux': montant_attendu_emprunts
+            'tresor_liquide': tresor_disponible['tresor_disponible'],  # ✅ NOUVEAU
+            'engagements_totaux': montant_attendu_emprunts,
+            'peut_emprunter': tresor_disponible['peut_emprunter']  # ✅ NOUVEAU
         }
     }
 
@@ -104,63 +139,67 @@ def calculer_donnees_membre_completes(membre):
     inscription_data = {
         'montant_total_inscription': montant_total_inscription,
         'montant_paye_inscription': total_paye_inscription,
-        'montant_restant_inscription': montant_total_inscription - total_paye_inscription,
+        'montant_restant_inscription': max(montant_total_inscription - total_paye_inscription,0),
         'inscription_complete': membre.inscription_terminee,
         'pourcentage_inscription': (total_paye_inscription / montant_total_inscription * 100) 
                                    if montant_total_inscription > 0 else 0
     }
     
-    # 2. SOLIDARITÉ (SESSION COURANTE + CUMUL DES DETTES) ✅ AMÉLIORÉ
-    solidarite_data = {'sessions_impayees': []}
-    
-    if session_courante:
-        # Solidarité pour la session courante
-        paiement_session_courante = PaiementSolidarite.objects.filter(
+    # 2. SOLIDARITÉ (EXERCICE ENTIER, PAIEMENTS PAR TRANCHE)
+    solidarite_data = {}
+
+    exercice_courant = Exercice.get_exercice_en_cours()
+    if exercice_courant:
+        # Montant de base de la solidarité (config)
+        montant_solidarite_base = config.montant_solidarite
+
+        # Vérifier s'il y a un report (dette ou surplus) de l'exercice précédent
+        from core.models import SolidariteExerciceReport
+        report = SolidariteExerciceReport.objects.filter(
             membre=membre,
-            session=session_courante
+            exercice_cible=exercice_courant
+        ).first()
+
+        montant_reporte = report.montant_reporte if report else Decimal('0')
+        # total_solidarite_due = base + dette reportée - surplus reporté (min 0)
+        total_solidarite_due = max(montant_solidarite_base + montant_reporte, Decimal('0'))
+
+        total_solidarite_payee = PaiementSolidarite.objects.filter(
+            membre=membre,
+            session__exercice=exercice_courant
         ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
-        
+
         solidarite_data.update({
-            'montant_solidarite_session_courante': config.montant_solidarite,
-            'montant_paye_session_courante': paiement_session_courante,
-            'montant_restant_session_courante': config.montant_solidarite - paiement_session_courante,
-            'solidarite_session_courante_complete': paiement_session_courante >= config.montant_solidarite
+            'exercice': exercice_courant.nom,
+            'montant_solidarite_base': montant_solidarite_base,
+            'montant_reporte': montant_reporte,  # + = dette, - = surplus
+            'total_solidarite_due': montant_solidarite_base,
+            'total_solidarite_payee': total_solidarite_payee,
+            'dette_solidarite_cumul': max(total_solidarite_due - total_solidarite_payee, Decimal('0')),
+            'solidarite_a_jour': total_solidarite_payee >= total_solidarite_due
         })
-    
-    # ✅ CALCUL CORRIGÉ DU CUMUL DES DETTES
-    # Utiliser les montants RÉELS dus (historiques) et non le montant actuel
-    sessions_depuis_inscription = Session.objects.filter(
-        date_session__gte=membre.session_inscription.date_session,
-        statut__in=['EN_COURS', 'TERMINEE']
-    )
-    
-    # Calculer le total réellement dû en additionnant les montants_solidarite_du
-    total_solidarite_due = Decimal('0')
-    for session in sessions_depuis_inscription:
-        # Vérifier s'il y a eu un paiement pour cette session
-        print(session)
-        premier_paiement = PaiementSolidarite.objects.filter(
-            membre=membre,
-            session=session
-        ).order_by('date_paiement').first()
-        
-        if premier_paiement:
-            # Utiliser le montant historique enregistré
-            total_solidarite_due += premier_paiement.montant_solidarite_du
-        else:
-            # Session non payée, utiliser le montant actuel de la config
-            total_solidarite_due += config.montant_solidarite
-    
-    total_solidarite_payee = PaiementSolidarite.objects.filter(
-        membre=membre,
-    ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
-    
-    solidarite_data.update({
-        'total_solidarite_due': total_solidarite_due,
-        'total_solidarite_payee': total_solidarite_payee,
-        'dette_solidarite_cumul': total_solidarite_due - total_solidarite_payee,
-        'solidarite_a_jour': total_solidarite_payee >= total_solidarite_due
-    })
+
+        if session_courante:
+            solidarite_data.update({
+                'montant_solidarite_session_courante': max(total_solidarite_due - total_solidarite_payee, Decimal('0')),
+                'montant_paye_session_courante': PaiementSolidarite.objects.filter(
+                    membre=membre,
+                    session=session_courante
+                ).aggregate(total=Sum('montant'))['total'] or Decimal('0'),
+                'montant_restant_session_courante': max(total_solidarite_due - total_solidarite_payee, Decimal('0')),
+                'solidarite_session_courante_complete': total_solidarite_payee >= total_solidarite_due
+            })
+    else:
+        solidarite_data.update({
+            'exercice': None,
+            'montant_solidarite_base': Decimal('0'),
+            'montant_reporte': Decimal('0'),
+            'total_solidarite_due': Decimal('0'),
+            'total_solidarite_payee': Decimal('0'),
+            'dette_solidarite_cumul': Decimal('0'),
+            'solidarite_a_jour': False
+        })
+
     
     # 3. ÉPARGNES ET INTÉRÊTS
     transactions_epargne = EpargneTransaction.objects.filter(membre=membre)
@@ -258,27 +297,26 @@ def calculer_donnees_membre_completes(membre):
     }
     
     # 6. STATUT GLOBAL "EN RÈGLE"
-    # Un membre est en règle s'il a payé son inscription complètement
-    # et s'il n'a pas de retard critique sur les autres obligations excepter les renflouementsnt
-    from core.models import Membre
+    # ✅ NOUVELLE LOGIQUE: Période de grâce de 3 mois par exercice
     
+    from core.models import Membre
     peut_definir_statuts = Membre.peut_definir_statuts_membre(membre)
     
     if not peut_definir_statuts:
-        # Avant 3 sessions, on ne définit pas les statuts
-        en_regle = False  # Statut indéterminé
-        print(f"⏳ Membre {membre.numero_membre}: Statut non défini (< 3 sessions)")
+        # Période de grâce: tous les membres sont EN_REGLE
+        en_regle = True
+        print(f"⏳ Membre {membre.numero_membre}: Période de grâce → EN_REGLE par défaut")
     else:
-        # Après 3 sessions, on applique les règles normales
-
-        if solidarite_data['solidarite_a_jour'] :
-            print('%%%%%%%%%%%%%% solidarite a jour')
+        # Après 3 mois: évaluation selon les critères
+        if solidarite_data['solidarite_a_jour']:
+            print('✅ Solidarité à jour')
         else:
-            print('%%%%%%%%%%%%%% solidarite pas a jour')
-        if emprunt_data['montant_restant_a_rembourser'] < Decimal('100') :
-            print('%%%%%%%%%%%%%% emprunt restant < 100')
-        else :
-            print('%%%%%%%%%%%%%% emprunt restant >= 100')
+            print('❌ Solidarité pas à jour')
+            
+        if emprunt_data['montant_restant_a_rembourser'] < Decimal('100'):
+            print('✅ Emprunt restant < 100 FCFA')
+        else:
+            print('❌ Emprunt restant >= 100 FCFA')
 
         en_regle = (
             solidarite_data['solidarite_a_jour'] and
@@ -286,7 +324,7 @@ def calculer_donnees_membre_completes(membre):
             inscription_data['inscription_complete'] and
             emprunt_data['montant_restant_a_rembourser'] < Decimal('100')
         )
-        print(f"✅ Membre {membre.numero_membre}: En règle = {en_regle}")
+        print(f"✅ Membre {membre.numero_membre}: Évaluation après période de grâce = {en_regle}")
     
     # 7. DONNÉES CONSOLIDÉES
     donnees_completes = {

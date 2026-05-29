@@ -372,6 +372,7 @@ class RenflouementAdmin(admin.ModelAdmin):
     montant_paye_formate.short_description = 'Payé'
     
     def montant_restant_formate(self, obj):
+        from django.utils.safestring import mark_safe
         restant = obj.montant_restant
         if restant > 0:
             return format_html(
@@ -379,8 +380,8 @@ class RenflouementAdmin(admin.ModelAdmin):
                 restant
             )
         else:
-            return format_html(
-                '<span style="color: green;">Soldé</span>'
+            return mark_safe(
+                '<span style="color: green; font-weight: bold;">Soldé ✓</span>'
             )
     montant_restant_formate.short_description = 'Restant'
     

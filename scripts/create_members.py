@@ -141,11 +141,6 @@ def create_user_and_member(
         return None, None, False
 
 
-from datetime import datetime, date
-from decimal import Decimal
-from django.db import transaction
-from django.contrib.auth.hashers import make_password
-
 def create_multiple_members(members_data, password='000000'):
     """
     Crée plusieurs membres à partir d'une liste de dictionnaires.
@@ -168,116 +163,71 @@ def create_multiple_members(members_data, password='000000'):
     results = []
     created_count = 0
     
-    # Utilisation d'une transaction atomique pour garantir l'intégrité
-    with transaction.atomic():
-        # Vérifier ou créer un exercice EN_COURS
-        exercice = Exercice.get_exercice_en_cours()
-        if not exercice:
-            print("🔄 Aucun exercice EN_COURS disponible. Création d'un nouvel exercice...")
-            
-            try:
-                # Création d'un nouvel exercice
-                current_year = datetime.now().year
-                exercice = Exercice(
-                    nom=f"E{current_year}",
-                    date_debut=date.today(),
-                    statut='EN_COURS'
-                )
-                
-                # Calcul de la date de fin (1 an plus tard par défaut)
-                exercice.date_fin = date.today().replace(year=current_year + 1)
-                
-                # Sauvegarde avec validation
-                exercice.full_clean()
-                exercice.save()
-                
-                print(f"✅ Nouvel exercice créé: {exercice.nom} ({exercice.date_debut} - {exercice.date_fin})")
-            except Exception as e:
-                print(f"❌ ERREUR lors de la création de l'exercice: {e}")
-                return results
+    # Vérifier qu'il y a au moins un exercice EN_COURS
+    exercice = Exercice.get_exercice_en_cours()
+    if not exercice:
+        print("❌ ERREUR: Aucun exercice EN_COURS disponible.")
+        print("   Créez d'abord un exercice EN_COURS dans l'admin Django.")
+        return results
+    
+    session = Session.get_session_en_cours()
+    if not session:
+        print(f"⚠️  Aucune session EN_COURS. Création automatique...")
+        session, _ = Session.objects.get_or_create(
+            exercice=exercice,
+            defaults={
+                'date_session': date.today(),
+                'nom': f'Session {date.today().month}/{date.today().year}'
+            }
+        )
+    
+    print(f"\n{'='*70}")
+    print(f"CRÉATION DE {len(members_data)} MEMBRE(S)")
+    print(f"Exercice: {exercice.nom}")
+    print(f"Session: {session.nom if hasattr(session, 'nom') else 'N/A'}")
+    print(f"{'='*70}\n")
+    
+    for member_data in members_data:
+        # Extraire et valider les données
+        email = member_data.get('email')
+        username = member_data.get('username')
+        first_name = member_data.get('first_name')
+        last_name = member_data.get('last_name')
+        telephone = member_data.get('telephone')
+        role = member_data.get('role', 'MEMBRE')
+        statut = member_data.get('statut', 'NON_DEFINI')
+        member_password = member_data.get('password', password)
         
-        # Vérifier ou créer une session EN_COURS
-        session = Session.get_session_en_cours()
-        if not session:
-            print(f"🔄 Aucune session EN_COURS. Création automatique...")
-            
-            try:
-                # Création d'une nouvelle session
-                session = Session(
-                    exercice=exercice,
-                    nom=f"S1-{datetime.now().year}",
-                    date_session=date.today(),
-                    statut='EN_COURS',
-                    montant_collation=Decimal('0')  # Pas de collation pour la session initiale
-                )
-                
-                # Sauvegarde avec validation
-                session.full_clean()
-                session.save()
-                
-                print(f"✅ Nouvelle session créée: {session.nom} ({session.date_session})")
-            except Exception as e:
-                print(f"❌ ERREUR lors de la création de la session: {e}")
-                # Si la session ne peut pas être créée, on essaie de récupérer une session existante de l'exercice
-                session = Session.objects.filter(exercice=exercice).first()
-                if not session:
-                    print(f"❌ Impossible de trouver ou créer une session. Abandon.")
-                    return results
+        # Validation minimale
+        if not all([email, username, first_name, last_name, telephone]):
+            print(f"❌ ERREUR: Données incomplètes pour {member_data}")
+            continue
         
-        print(f"\n{'='*70}")
-        print(f"CRÉATION DE {len(members_data)} MEMBRE(S)")
-        print(f"Exercice: {exercice.nom} ({exercice.statut})")
-        print(f"Session: {session.nom} ({session.date_session})")
-        print(f"{'='*70}\n")
+        # Créer l'utilisateur et membre
+        user, membre, created = create_user_and_member(
+            email=email,
+            username=username,
+            first_name=first_name,
+            last_name=last_name,
+            telephone=telephone,
+            password=member_password,
+            role=role,
+            exercice=exercice,
+            session=session,
+            statut=statut
+        )
         
-        for member_data in members_data:
-            # Extraire et valider les données
-            email = member_data.get('email')
-            username = member_data.get('username')
-            first_name = member_data.get('first_name')
-            last_name = member_data.get('last_name')
-            telephone = member_data.get('telephone')
-            role = member_data.get('role', 'MEMBRE')
-            statut = member_data.get('statut', 'NON_DEFINI')
-            member_password = member_data.get('password', password)
-            
-            # Validation minimale
-            if not all([email, username, first_name, last_name, telephone]):
-                print(f"❌ ERREUR: Données incomplètes pour {member_data}")
-                continue
-            
-            try:
-                # Créer l'utilisateur et membre
-                user, membre, created = create_user_and_member(
-                    email=email,
-                    username=username,
-                    first_name=first_name,
-                    last_name=last_name,
-                    telephone=telephone,
-                    password=member_password,
-                    role=role,
-                    exercice=exercice,
-                    session=session,
-                    statut=statut
-                )
-                
-                if created:
-                    created_count += 1
-                    print(f"✅ Membre créé: {first_name} {last_name} ({membre.numero_membre})")
-                else:
-                    print(f"⚠️  Membre déjà existant: {first_name} {last_name}")
-                
-                results.append((user, membre, created))
-                
-            except Exception as e:
-                print(f"❌ ERREUR lors de la création du membre {first_name} {last_name}: {e}")
-                continue
+        if created:
+            created_count += 1
+        
+        results.append((user, membre, created))
     
     print(f"\n{'='*70}")
     print(f"RÉSUMÉ: {created_count} nouveau(x) membre(s) créé(s) sur {len(members_data)}")
     print(f"{'='*70}\n")
     
     return results
+
 
 def interactive_create(password='000000'):
     """

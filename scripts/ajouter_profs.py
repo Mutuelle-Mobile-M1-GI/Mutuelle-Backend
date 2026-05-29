@@ -21,7 +21,7 @@ def slugify_name(name):
 
 # Liste complète des 60 membres extraits des images
 MEMBERS_LIST = [
-    ("STEPHANE", "ATOCK"), ("Charles", "AWONO O."), ("Barnabé", "BATCHAKUI"),
+    ("STEPHANE", "ATOCK"), ("Charles", "AWONO O."), ("Bernabé", "BATCHAKUI"),
     ("TIBI", "BEDA"), ("Didier", "BELOBO BELOBO"), ("JEAN CALVIN", "BIDOUNG"),
     ("DANIEL", "BITANG A ZIEM"), ("Florent", "BIYEME"), ("Thomas", "BOUETOU B."),
     ("Marthe", "BOYOMO O."), ("Anne Marie", "CHANA"), ("Thomas", "DJOTIO"),

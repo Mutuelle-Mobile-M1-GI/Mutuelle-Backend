@@ -1,15 +1,37 @@
 from rest_framework import serializers
 from decimal import Decimal
 from django.db import models
+import json
+import time
 # 🦊 CRITIQUE: Un `try` sans `catch` ? C'est comme sauter en parachute sans vérifier s'il y en a un.
 
 
 from .models import (
     ConfigurationMutuelle, Exercice, Session, TypeAssistance, 
-    Membre, FondsSocial, MouvementFondsSocial
+    Membre, FondsSocial, MouvementFondsSocial,
+    CaisseInscription, MouvementCaisseInscription
 )
 from authentication.serializers import UtilisateurSerializer
 from .utils import calculer_donnees_membre_completes, calculer_donnees_administrateur
+
+
+def _agent_debug_log(hypothesis_id, location, message, data):
+    # region agent log
+    try:
+        payload = {
+            "sessionId": "5523dd",
+            "runId": "pre-fix",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        with open("/home/darren/Bureau/projet/Mutuelle-Backend/.cursor/debug-5523dd.log", "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    except Exception:
+        pass
+    # endregion
 
 class ConfigurationMutuelleSerializer(serializers.ModelSerializer):
     """
@@ -63,28 +85,16 @@ class SessionSerializer(serializers.ModelSerializer):
         model = Session
         fields = [
             'id', 'exercice', 'exercice_nom', 'nom', 'date_session', 
-            'montant_collation', 'statut', 'description', 'is_en_cours',
+            'montant_collation', 'montant_autre_depense', 'motif_autre_depense',
+            'statut', 'description', 'is_en_cours',
             'nombre_membres_inscrits', 'total_solidarite_collectee',
             'renflouements_generes', 'date_creation', 'date_modification'
         ]
 
     def validate(self, attrs):
         """
-        Logique de transition : clôture l'ancienne session avant de valider la nouvelle.
+        Validation simple sans modifications de base de données
         """
-        statut = attrs.get('statut', 'EN_COURS')
-        exercice = attrs.get('exercice')
-
-        # Si on crée une nouvelle session (pas d'ID encore) en mode EN_COURS
-        if not self.instance and statut == 'EN_COURS' and exercice:
-            # On cherche l'ancienne session en cours pour cet exercice
-            # On utilise .update() car cela ne déclenche pas les signaux/clean
-            # et libère immédiatement la contrainte UniqueConstraint en DB.
-            Session.objects.filter(
-                exercice=exercice, 
-                statut='EN_COURS'
-            ).update(statut='TERMINEE')
-            
         return super().validate(attrs)
     
     def get_nombre_membres_inscrits(self, obj):
@@ -95,16 +105,70 @@ class SessionSerializer(serializers.ModelSerializer):
         from transactions.models import PaiementSolidarite
         from django.db.models import Sum
         from decimal import Decimal
-        total = PaiementSolidarite.objects.filter(session=obj).aggregate(
-            total=Sum('montant'))['total'] or Decimal('0')
+        # Solidarité maintenant cumulée sur l'exercice, pas seulement sur la session
+        total = PaiementSolidarite.objects.filter(
+            session__exercice=obj.exercice
+        ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
         return total
     
     def get_renflouements_generes(self, obj):
         from django.db.models import Sum
         from decimal import Decimal
-        total = obj.renflouements.aggregate(
-            total=Sum('montant_du'))['total'] or Decimal('0')
-        return total
+        from transactions.models import Renflouement
+        from django.db import connection
+        _agent_debug_log(
+            "H1",
+            "core/serializers.py:get_renflouements_generes:entry",
+            "Entry get_renflouements_generes",
+            {
+                "session_id": str(obj.id),
+                "exercice_id": str(obj.exercice_id) if obj.exercice_id else None,
+                "renflouement_fields": [f.name for f in Renflouement._meta.fields],
+                "has_reverse_manager": hasattr(obj, "renflouements"),
+            },
+        )
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("PRAGMA table_info(transactions_renflouement)")
+                cols = [row[1] for row in cursor.fetchall()]
+            _agent_debug_log(
+                "H2",
+                "core/serializers.py:get_renflouements_generes:schema",
+                "DB schema for transactions_renflouement",
+                {"columns": cols},
+            )
+        except Exception as schema_err:
+            _agent_debug_log(
+                "H2",
+                "core/serializers.py:get_renflouements_generes:schema_error",
+                "Failed to inspect DB schema",
+                {"error": str(schema_err)},
+            )
+        _agent_debug_log(
+            "H3",
+            "core/serializers.py:get_renflouements_generes:skip_reverse_aggregate",
+            "Skip reverse relation aggregate (session-based)",
+            {},
+        )
+        try:
+            total_exercice = Renflouement.objects.filter(
+                exercice=obj.exercice
+            ).aggregate(total=Sum("montant_du"))["total"] or Decimal("0")
+            _agent_debug_log(
+                "H4",
+                "core/serializers.py:get_renflouements_generes:exercice_aggregate",
+                "Aggregate via exercice filter",
+                {"total_exercice": str(total_exercice)},
+            )
+            return total_exercice
+        except Exception as ex_err:
+            _agent_debug_log(
+                "H4",
+                "core/serializers.py:get_renflouements_generes:exercice_aggregate_error",
+                "Aggregate via exercice filter failed",
+                {"error_type": ex_err.__class__.__name__, "error": str(ex_err)},
+            )
+            return Decimal("0")
     
 class TypeAssistanceSerializer(serializers.ModelSerializer):
     """
@@ -155,28 +219,89 @@ class MouvementFondsSocialSerializer(serializers.ModelSerializer):
         model = MouvementFondsSocial
         fields = '__all__'
 
+
+class CaisseInscriptionSerializer(serializers.ModelSerializer):
+    """
+    Serializer pour la caisse inscription
+    """
+    exercice_nom = serializers.CharField(source='exercice.nom', read_only=True)
+    mouvements_recents = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CaisseInscription
+        fields = [
+            'id', 'exercice', 'exercice_nom', 'montant_total',
+            'mouvements_recents', 'date_creation', 'date_modification'
+        ]
+
+    def get_mouvements_recents(self, obj):
+        mouvements = obj.mouvements.all()[:10]
+        return MouvementCaisseInscriptionSerializer(mouvements, many=True).data
+
+
+class MouvementCaisseInscriptionSerializer(serializers.ModelSerializer):
+    """
+    Serializer pour les mouvements de la caisse inscription
+    """
+    class Meta:
+        model = MouvementCaisseInscription
+        fields = '__all__'
+
+
 class MembreSerializer(serializers.ModelSerializer):
     """
     Serializer pour les membres AVEC TOUTES LES DONNÉES CALCULÉES
     C'est LE serializer le plus important pour le frontend !
     """
-    utilisateur = UtilisateurSerializer(read_only=True)
+    utilisateur = UtilisateurSerializer(read_only=False, required=False)
     exercice_inscription_nom = serializers.CharField(source='exercice_inscription.nom', read_only=True)
     session_inscription_nom = serializers.CharField(source='session_inscription.nom', read_only=True)
     is_en_regle = serializers.ReadOnlyField()
-    
+    is_actif = serializers.ReadOnlyField()
+
     # TOUTES LES DONNÉES FINANCIÈRES CALCULÉES
     donnees_financieres = serializers.SerializerMethodField()
-    
+
     class Meta:
         model = Membre
         fields = [
             'id', 'utilisateur', 'numero_membre', 'date_inscription', 'statut',
             'exercice_inscription', 'exercice_inscription_nom',
             'session_inscription', 'session_inscription_nom',
-            'is_en_regle', 'donnees_financieres',
+            'is_en_regle', 'is_actif', 'donnees_financieres',
             'date_creation', 'date_modification'
         ]
+    
+    def create(self, validated_data):
+        """
+        Crée un Membre avec un Utilisateur imbriqué
+        """
+        from django.contrib.auth import get_user_model
+        from django.db import transaction
+        
+        User = get_user_model()
+        utilisateur_data = validated_data.pop('utilisateur', None)
+        
+        with transaction.atomic():
+            # Créer l'utilisateur si les données sont fournies
+            if utilisateur_data:
+                # Extraire le mot de passe avant de créer l'utilisateur
+                password = utilisateur_data.pop('password', None)
+                
+                # Créer l'utilisateur
+                utilisateur = User.objects.create_user(**utilisateur_data)
+                
+                # Définir le mot de passe (qui sera hashé)
+                if password:
+                    utilisateur.set_password(password)
+                    utilisateur.save()
+                
+                validated_data['utilisateur'] = utilisateur
+            
+            # Créer le Membre
+            membre = Membre.objects.create(**validated_data)
+        
+        return membre
     
     def get_donnees_financieres(self, obj):
         """
@@ -236,6 +361,34 @@ class DonneesAdministrateurSerializer(serializers.Serializer):
             'terminees': sessions_terminees
         }
 from .models import EmpruntCoefficientTier
+
+
+class SessionDepenseSerializer(serializers.ModelSerializer):
+    """
+    Serializer pour exposer les dépenses liées à une session
+    (collation + autres dépenses).
+    """
+    exercice_id = serializers.UUIDField(source='exercice.id', read_only=True)
+    exercice_nom = serializers.CharField(source='exercice.nom', read_only=True)
+    total_depenses = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Session
+        fields = [
+            'id',
+            'nom',
+            'date_session',
+            'exercice_id',
+            'exercice_nom',
+            'montant_collation',
+            'montant_autre_depense',
+            'motif_autre_depense',
+            'total_depenses',
+        ]
+
+    def get_total_depenses(self, obj):
+        from decimal import Decimal
+        return (obj.montant_collation or Decimal('0')) + (obj.montant_autre_depense or Decimal('0'))
 class EmpruntCoefficientTierSerializer(serializers.ModelSerializer):
     """
     Serializer pour les tranches de coefficient d'emprunt

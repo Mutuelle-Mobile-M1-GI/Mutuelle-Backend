@@ -179,17 +179,35 @@ class AdministrationDashboardViewSet(viewsets.ViewSet):
     
     def _get_membres_problematiques(self):
         """Membres ayant des problèmes financiers"""
-        # Membres avec inscription non complète depuis plus de 3 mois
-        from datetime import timedelta
-        three_months_ago = timezone.now() - timedelta(days=90)
+        # Membres avec inscription non complète depuis plus de 3 sessions
+        from core.models import Exercice, Session
         
         config = ConfigurationMutuelle.get_configuration()
         
         membres_problematiques = []
         
-        # Inscription non terminée
+        # Vérifier s'il y a un exercice en cours
+        exercice_actuel = Exercice.get_exercice_en_cours()
+        if not exercice_actuel:
+            return membres_problematiques
+        
+        # Compter le nombre de sessions terminées dans cet exercice
+        sessions_terminees = Session.objects.filter(
+            exercice=exercice_actuel,
+            statut='TERMINEE'
+        ).count()
+        
+        # Période de grâce = 3 sessions
+        PERIODE_GRACE_SESSIONS = 3
+        
+        # Si moins de 3 sessions terminées, pas encore de membres problématiques
+        if sessions_terminees < PERIODE_GRACE_SESSIONS:
+            return membres_problematiques
+        
+        # Inscription non terminée après la période de grâce
         membres_inscription_incomplete = Membre.objects.filter(
-            date_inscription__lte=three_months_ago
+            date_inscription__lte=exercice_actuel.date_debut,
+            actif=True
         ).annotate(
             total_paye=Sum('paiements_inscription__montant')
         ).filter(
@@ -203,7 +221,7 @@ class AdministrationDashboardViewSet(viewsets.ViewSet):
                 'numero': membre.numero_membre,
                 'nom': membre.utilisateur.nom_complet,
                 'probleme': 'INSCRIPTION_INCOMPLETE',
-                'details': f"Payé {total_paye:,.0f} sur {config.montant_inscription:,.0f}"
+                'details': f"Payé {total_paye:,.0f} sur {config.montant_inscription:,.0f} (après {sessions_terminees} sessions)"
             })
         
         return membres_problematiques[:10]  # Top 10
@@ -233,61 +251,66 @@ class GestionMembresViewSet(viewsets.ViewSet):
                 )
             
             # On recupere le montant que devait payer le membre a partir du premier paiement
-            premier_paiement = PaiementInscription.objects.filter(
-                membre=membre
-            ).order_by('date_paiement').first()
+            if membre.actif==True:
+            
+                premier_paiement = PaiementInscription.objects.filter(
+                    membre=membre
+                ).order_by('date_paiement').first()
 
-            if premier_paiement:
-                montant_inscription_du = premier_paiement.montant_inscription_du
-            else:
+                if premier_paiement:
+                    montant_inscription_du = premier_paiement.montant_inscription_du
+                else:
                 # Utiliser la config par défaut si pas encore payé
-                montant_inscription_du = ConfigurationMutuelle.get_configuration().montant_inscription            
-            print(f"📝 Paiement suivant: montant dû = {montant_inscription_du}")
-            paiement = PaiementInscription.objects.create(
-                membre=membre,
-                montant=serializer.validated_data['montant'],
-                session=session,
-                notes=serializer.validated_data.get('notes', ''),
-                montant_inscription_du=montant_inscription_du
-            )
+                    montant_inscription_du = ConfigurationMutuelle.get_configuration().montant_inscription            
+                print(f"📝 Paiement suivant: montant dû = {montant_inscription_du}")
+                paiement = PaiementInscription.objects.create(
+                    membre=membre,
+                    montant=serializer.validated_data['montant'],
+                    session=session,
+                    notes=serializer.validated_data.get('notes', ''),
+                    montant_inscription_du=montant_inscription_du
+                )
             #Mettre a jour inscription_terminee
-            if membre.update_inscription_terminee() :
+                if membre.update_inscription_terminee() :
                 #print("%%%%%%%%%%%%%%%%Inscription termiee pour le membre")
-                membre.save()            
+                    membre.save()            
 
             # Mettre à jour le statut du membre si inscription complète
-            total_paye = PaiementInscription.objects.filter(
-                membre=membre
-            ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+                total_paye = PaiementInscription.objects.filter(
+                    membre=membre
+                ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
             
-            if membre.inscription_terminee:
+                if membre.inscription_terminee:
                 
-                try:
-                    if membre.calculer_statut_en_regle():
-                        membre.statut = 'EN_REGLE'
-                        membre.save()
-                except e :
-                    print(f"Erreur de calcul de statut en regle : {e} ")
-                    pass
-                print("MEMBRE EN REGLE POUR INSCRIPTION")
+                    try:
+                        if membre.calculer_statut_en_regle():
+                            membre.statut = 'EN_REGLE'
+                            membre.save()
+                    except e :
+                        print(f"Erreur de calcul de statut en regle : {e} ")
+                        pass
+                    print("MEMBRE EN REGLE POUR INSCRIPTION")
             
-            return Response({
-                'message': 'Paiement inscription ajouté avec succès',
-                'paiement_id': str(paiement.id),
-                'nouveau_statut': membre.statut,
-                'total_paye': total_paye
-            })
+                return Response({
+                    'message': 'Paiement inscription ajouté avec succès',
+                    'paiement_id': str(paiement.id),
+                    'nouveau_statut': membre.statut,
+                    'total_paye': total_paye
+                })
+            else:
+                print("membre inactif")    
             
         except Membre.DoesNotExist:
-            return Response(
-                {'error': 'Membre introuvable'}, 
-                status=status.HTTP_404_NOT_FOUND
-            )
+                return Response(
+                    {'error': 'Membre introuvable'}, 
+                    status=status.HTTP_404_NOT_FOUND
+                )
         except Exception as e:
-            return Response(
-                {'error': str(e)}, 
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+                return Response(
+                    {'error': str(e)}, 
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+                
     
     @action(detail=False, methods=['post'])
     def ajouter_paiement_solidarite(self, request):
@@ -311,31 +334,33 @@ class GestionMembresViewSet(viewsets.ViewSet):
                     {'error': 'Session introuvable'}, 
                     status=status.HTTP_400_BAD_REQUEST
                 )
-            
+            if membre.actif==True:
             # Vérifier si déjà payé pour cette session
-            paiement_existant = PaiementSolidarite.objects.filter(
-                membre=membre, session=session
-            ).first()
+                paiement_existant = PaiementSolidarite.objects.filter(
+                    membre=membre, session=session
+                ).first()
             
-            if paiement_existant:
+                if paiement_existant:
                 # Mettre à jour le montant
-                paiement_existant.montant += serializer.validated_data['montant']
-                paiement_existant.save()
-                paiement = paiement_existant
-            else:
+                    paiement_existant.montant += serializer.validated_data['montant']
+                    paiement_existant.save()
+                    paiement = paiement_existant
+                else:
                 # Créer nouveau paiement
-                paiement = PaiementSolidarite.objects.create(
-                    membre=membre,
-                    session=session,
-                    montant=serializer.validated_data['montant'],
-                    notes=serializer.validated_data.get('notes', '')
-                )
+                    paiement = PaiementSolidarite.objects.create(
+                        membre=membre,
+                        session=session,
+                        montant=serializer.validated_data['montant'],
+                        notes=serializer.validated_data.get('notes', '')
+                    )
             
-            return Response({
-                'message': 'Paiement solidarité ajouté avec succès',
-                'paiement_id': str(paiement.id),
-                'montant_total': paiement.montant
-            })
+                return Response({
+                    'message': 'Paiement solidarité ajouté avec succès',
+                    'paiement_id': str(paiement.id),
+                    'montant_total': paiement.montant
+                })
+            else:
+                print("membre inactif")  
             
         except (Membre.DoesNotExist, Session.DoesNotExist):
             return Response(
@@ -365,26 +390,28 @@ class GestionMembresViewSet(viewsets.ViewSet):
                     {'error': 'Aucune session en cours'}, 
                     status=status.HTTP_400_BAD_REQUEST
                 )
-            
-            epargne = EpargneTransaction.objects.create(
-                membre=membre,
-                type_transaction='DEPOT',
-                montant=serializer.validated_data['montant'],
-                session=session,
-                notes=serializer.validated_data.get('notes', '')
-            )
+            if membre.actif==True:
+                
+                epargne = EpargneTransaction.objects.create(
+                    membre=membre,
+                    type_transaction='DEPOT',
+                    montant=serializer.validated_data['montant'],
+                    session=session,
+                    notes=serializer.validated_data.get('notes', '')
+                )
             
             # Calculer nouvelle épargne totale
-            nouvelle_epargne = membre.calculer_epargne_totale()
+                nouvelle_epargne = membre.calculer_epargne_totale()
             
-            return Response({
-                'message': 'Épargne ajoutée avec succès',
-                'transaction_id': str(epargne.id),
-                'nouvelle_epargne_totale': nouvelle_epargne
-            })
-            
+                return Response({
+                    'message': 'Épargne ajoutée avec succès',
+                    'transaction_id': str(epargne.id),
+                    'nouvelle_epargne_totale': nouvelle_epargne
+                })
+            else:
+                print("membre inactif")  
         except Membre.DoesNotExist:
-            return Response(
+                return Response(
                 {'error': 'Membre introuvable'}, 
                 status=status.HTTP_404_NOT_FOUND
             )
@@ -957,15 +984,23 @@ class GestionMembresViewSet(viewsets.ViewSet):
                     print(membre.update_inscription_terminee())
                     membre.save()
                     
-                    # ✅ CORRECTION: Déterminer le statut selon la même logique que core/utils.py
-                    # Un membre ne peut passer "EN_REGLE" que si le nombre de sessions >= 3
+                    # ✅ NOUVELLE LOGIQUE: Période de grâce de 3 mois par exercice
+                    # Déterminer le statut selon la période de grâce
+                    
+                   
                     peut_definir_statuts = Membre.peut_definir_statuts_membre(membre)
                     
-                    if peut_definir_statuts and montant_initial >= config.montant_inscription:
-                        # Les statuts peuvent être définis ET inscription complète
+                    if not peut_definir_statuts:
+                        # Période de grâce: membre reste EN_REGLE
                         membre.statut = 'EN_REGLE'
+                    elif montant_initial >= config.montant_inscription:
+                        # Après période de grâce ET inscription complète
+                        if membre.calculer_statut_en_regle():
+                            membre.statut = 'EN_REGLE'
+                        else:
+                            membre.statut = 'NON_EN_REGLE'
                     else:
-                        # Avant 3 sessions ou inscription incomplète -> statut NON_DEFINI
+                        # Inscription incomplète
                         membre.statut = 'NON_DEFINI'
                     
                     membre.save()
