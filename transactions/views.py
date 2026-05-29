@@ -2062,83 +2062,56 @@ class RetraitEpargneViewSet(viewsets.ModelViewSet):
     ).all()
     serializer_class   = RetraitEpargneSerializer
     filterset_class    = RetraitEpargneFilter
-    permission_classes = [AllowAny]
-    ordering_fields    = ['date_demande', 'montant', 'statut']
-    ordering           = ['-date_demande']
+    permission_classes = [IsAdministrateur]  # Seul l'admin
+    ordering_fields    = ['date_retrait', 'montant']
+    ordering           = ['-date_retrait']
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         membre  = serializer.validated_data['membre']
         montant = serializer.validated_data['montant']
+
         epargne_dispo = membre.calculer_epargne_pure()
         if montant > epargne_dispo:
             return Response(
-                {"error": "Fonds insuffisants", "epargne_disponible": float(epargne_dispo), "montant_demande": float(montant)},
+                {"error": "Épargne insuffisante.",
+                 "epargne_disponible": float(epargne_dispo),
+                 "montant_demande": float(montant)},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        retrait = serializer.save()
-        return Response(self.get_serializer(retrait).data, status=status.HTTP_201_CREATED)
 
-    def destroy(self, request, *args, **kwargs):
-        retrait = self.get_object()
-        if retrait.statut != 'EN_ATTENTE':
-            return Response(
-                {"error": "Seul un retrait en attente peut être supprimé."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        retrait.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
-
-    @action(detail=True, methods=['post'], permission_classes=[AllowAny])
-    def approuver(self, request, pk=None):
-        retrait = self.get_object()
-        if retrait.statut != 'EN_ATTENTE':
-            return Response({"error": f"Ce retrait est déjà '{retrait.get_statut_display()}'."}, status=status.HTTP_400_BAD_REQUEST)
-        epargne_dispo = retrait.membre.calculer_epargne_pure()
-        if retrait.montant > epargne_dispo:
-            return Response(
-                {"error": "Épargne insuffisante.", "epargne_disponible": float(epargne_dispo), "montant_demande": float(retrait.montant)},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
         with db_transaction.atomic():
             import uuid as uuid_lib
             from django.db import connection
-            tx_id = uuid_lib.uuid4()
+            tx_id = uuid_lib.uuid4().hex
             now = timezone.now()
             with connection.cursor() as cursor:
                 cursor.execute("""
-                    INSERT INTO transactions_epargnetransaction 
+                    INSERT INTO transactions_epargnetransaction
                     (id, membre_id, session_id, type_transaction, montant, notes, date_transaction)
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """, [
-                    str(tx_id),
-                    str(retrait.membre.id),
-                    str(retrait.session.id),
+                    tx_id,
+                    membre.id.hex,
+                    serializer.validated_data['session'].id.hex,
                     'RETRAIT_EPARGNE',
-                    -retrait.montant,
-                    f"Retrait épargne approuvé – Demande #{retrait.id}",
+                    float(-montant),
+                    f"Retrait épargne – {serializer.validated_data.get('motif', '')}",
                     now,
                 ])
             epargne_tx = EpargneTransaction.objects.get(id=tx_id)
-            retrait.statut          = 'APPROUVE'
-            retrait.date_traitement = now
-            retrait.notes_admin     = request.data.get('notes_admin', retrait.notes_admin)
-            retrait.epargne_transaction = epargne_tx
-            retrait.save()
-        return Response(self.get_serializer(retrait).data, status=status.HTTP_200_OK)
-    @action(detail=True, methods=['post'], permission_classes=[AllowAny])
-    def rejeter(self, request, pk=None):
-        retrait = self.get_object()
-        if retrait.statut != 'EN_ATTENTE':
-            return Response({"error": f"Ce retrait est déjà '{retrait.get_statut_display()}'."}, status=status.HTTP_400_BAD_REQUEST)
-        retrait.statut          = 'REJETE'
-        retrait.date_traitement = timezone.now()
-        retrait.notes_admin     = request.data.get('notes_admin', retrait.notes_admin)
-        retrait.save()
-        return Response(self.get_serializer(retrait).data, status=status.HTTP_200_OK)
+            retrait = serializer.save(epargne_transaction=epargne_tx)
 
-    @action(detail=False, methods=['get'], permission_classes=[AllowAny])
+        return Response(self.get_serializer(retrait).data, status=status.HTTP_201_CREATED)
+
+    def update(self, request, *args, **kwargs):
+        return Response(
+            {"error": "Un retrait ne peut pas être modifié."},
+            status=status.HTTP_405_METHOD_NOT_ALLOWED
+        )
+
+    @action(detail=False, methods=['get'], permission_classes=[IsAdministrateur])
     def par_membre(self, request):
         membre_id = request.query_params.get('membre_id')
         if not membre_id:
@@ -2146,7 +2119,7 @@ class RetraitEpargneViewSet(viewsets.ModelViewSet):
         qs = self.get_queryset().filter(membre__id=membre_id)
         return Response(self.get_serializer(qs, many=True).data)
 
-    @action(detail=False, methods=['get'], permission_classes=[AllowAny])
+    @action(detail=False, methods=['get'], permission_classes=[IsAdministrateur])
     def epargne_disponible(self, request):
         membre_id = request.query_params.get('membre_id')
         if not membre_id:
@@ -2157,6 +2130,6 @@ class RetraitEpargneViewSet(viewsets.ModelViewSet):
             return Response({"error": "Membre introuvable."}, status=status.HTTP_404_NOT_FOUND)
         return Response({
             "membre_id":          str(membre.id),
-            "numero_membre":      membre.numero_membre,
+            "numero_membre":      membre.numero_embre,
             "epargne_disponible": float(membre.calculer_epargne_pure()),
         })

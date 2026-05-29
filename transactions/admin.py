@@ -437,24 +437,13 @@ from django.utils import timezone
 
 @admin.register(RetraitEpargne)
 class RetraitEpargneAdmin(admin.ModelAdmin):
-    list_display = ['membre', 'montant', 'statut', 'date_demande', 'date_traitement']
-    list_filter = ['statut', 'session']
+    list_display = ['membre', 'montant', 'date_retrait', 'epargne_transaction']
+    list_filter  = ['session']
     search_fields = ['membre__numero_membre']
-    readonly_fields = ['date_demande', 'date_traitement', 'epargne_transaction']
+    readonly_fields = ['date_retrait', 'epargne_transaction']
 
     def save_model(self, request, obj, form, change):
-        ancien_statut = None
-        if change:
-            ancien = RetraitEpargne.objects.get(pk=obj.pk)
-            ancien_statut = ancien.statut
-
-        doit_approuver = (
-            obj.statut == 'APPROUVE' and
-            (not change or ancien_statut == 'EN_ATTENTE') and
-            not obj.epargne_transaction
-        )
-
-        if doit_approuver:
+        if not change:  # Seulement à la création
             epargne_dispo = obj.membre.calculer_epargne_pure()
             if obj.montant > epargne_dispo:
                 self.message_user(
@@ -464,30 +453,30 @@ class RetraitEpargneAdmin(admin.ModelAdmin):
                     level='ERROR'
                 )
                 return
-                import uuid as uuid_lib
-                from django.db import connection
-                tx_id = uuid_lib.uuid4()
-                now = timezone.now()
-                with connection.cursor() as cursor:
-                    cursor.execute("""
-                        INSERT INTO transactions_epargnetransaction 
-                        (id, membre_id, session_id, type_transaction, montant, notes, date_transaction)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    """, [
-                        str(tx_id),
-                        str(obj.membre.id),
-                        str(obj.session.id),
-                        'RETRAIT_EPARGNE',
-                        -obj.montant,
-                        f"Retrait épargne approuvé – Demande #{obj.id}",
-                        now,
-                    ])
-                epargne_tx = EpargneTransaction.objects.get(id=tx_id)
-                obj.epargne_transaction = epargne_tx
-                obj.date_traitement = now
 
-#ici
-        super().save_model(request, obj, form, change)   
+            import uuid as uuid_lib
+            from django.db import connection
+            tx_id = uuid_lib.uuid4().hex
+            now = timezone.now()
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    INSERT INTO transactions_epargnetransaction
+                    (id, membre_id, session_id, type_transaction, montant, notes, date_transaction)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """, [
+                    tx_id,
+                    obj.membre.id.hex,
+                    obj.session.id.hex,
+                    'RETRAIT_EPARGNE',
+                    float(-obj.montant),
+                    f"Retrait épargne – {obj.motif}",
+                    now,
+                ])
+            epargne_tx = EpargneTransaction.objects.get(id=tx_id)
+            obj.epargne_transaction = epargne_tx
+
+        super().save_model(request, obj, form, change)
+#ici  
     
     
 

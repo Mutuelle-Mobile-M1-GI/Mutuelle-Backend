@@ -593,24 +593,22 @@ class PaiementRenflouementSerializer(serializers.ModelSerializer):
 from .models import RetraitEpargne
 
 class RetraitEpargneSerializer(serializers.ModelSerializer):
-    membre_info              = serializers.SerializerMethodField(read_only=True)
-    session_nom              = serializers.CharField(source='session.nom', read_only=True)
-    statut_display           = serializers.CharField(source='get_statut_display', read_only=True)
-    epargne_disponible       = serializers.SerializerMethodField(read_only=True)
-    epargne_transaction_info = serializers.SerializerMethodField(read_only=True)
+    membre_info        = serializers.SerializerMethodField(read_only=True)
+    session_nom        = serializers.CharField(source='session.nom', read_only=True)
+    epargne_disponible = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model  = RetraitEpargne
         fields = [
-            'id', 'membre', 'membre_info', 'session', 'session_nom',
-            'montant', 'statut', 'statut_display', 'motif', 'notes_admin',
-            'date_demande', 'date_traitement',
-            'epargne_disponible', 'epargne_transaction', 'epargne_transaction_info',
+            'id', 'membre', 'membre_info',
+            'session', 'session_nom',
+            'montant', 'motif',
+            'date_retrait', 'epargne_disponible',
+            'epargne_transaction',
         ]
-        read_only_fields = ['id', 'date_demande', 'date_traitement', 'epargne_transaction']
+        read_only_fields = ['id', 'date_retrait', 'epargne_transaction']
         extra_kwargs = {
-            'motif':       {'required': False, 'allow_blank': True},
-            'notes_admin': {'required': False, 'allow_blank': True},
+            'motif': {'required': False, 'allow_blank': True},
         }
 
     def get_membre_info(self, obj):
@@ -627,18 +625,10 @@ class RetraitEpargneSerializer(serializers.ModelSerializer):
     def get_epargne_disponible(self, obj):
         return float(obj.membre.calculer_epargne_pure())
 
-    def get_epargne_transaction_info(self, obj):
-        if not obj.epargne_transaction:
-            return None
-        t = obj.epargne_transaction
-        return {"id": str(t.id), "montant": float(t.montant), "date": t.date_transaction.isoformat()}
-
     def validate(self, attrs):
         membre  = attrs.get('membre')  or getattr(self.instance, 'membre', None)
         montant = attrs.get('montant') or getattr(self.instance, 'montant', Decimal('0'))
-        statut  = attrs.get('statut')  or getattr(self.instance, 'statut', 'EN_ATTENTE')
-
-        if membre and montant and statut != 'REJETE':
+        if membre and montant:
             epargne_dispo = membre.calculer_epargne_pure()
             if montant > epargne_dispo:
                 raise serializers.ValidationError({
@@ -647,12 +637,6 @@ class RetraitEpargneSerializer(serializers.ModelSerializer):
                         f"l'épargne disponible ({epargne_dispo:,.0f} FCFA)."
                     )
                 })
-
-        if self.instance and self.instance.statut in ('APPROUVE', 'REJETE'):
-            if 'montant' in attrs and attrs['montant'] != self.instance.montant:
-                raise serializers.ValidationError(
-                    "Impossible de modifier le montant d'un retrait déjà traité."
-                )
         return attrs
 
 class EmpruntDetailAvecPenalitesSerializer(serializers.ModelSerializer):
