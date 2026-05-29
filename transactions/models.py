@@ -1378,6 +1378,7 @@ class EpargneTransaction(models.Model):
         ('RETRAIT_PRET', 'Retrait pour prêt'),
         ('AJOUT_INTERET', 'Ajout d\'intérêt'),
         ('RETOUR_REMBOURSEMENT', 'Retour de remboursement'),
+        ('RETRAIT_EPARGNE', 'Retrait épargne'),  # ← NOUVEAU
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -1413,6 +1414,83 @@ class EpargneTransaction(models.Model):
 
     def save(self, *args, **kwargs):
         self.full_clean()
+        super().save(*args, **kwargs)
+
+class RetraitEpargne(models.Model):
+    STATUT_CHOICES = [
+        ('EN_ATTENTE', 'En attente'),
+        ('APPROUVE',   'Approuvé'),
+        ('REJETE',     'Rejeté'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    membre = models.ForeignKey(
+        'core.Membre', on_delete=models.CASCADE,
+        related_name='retraits_epargne', verbose_name='Membre',
+    )
+    session = models.ForeignKey(
+        'core.Session', on_delete=models.CASCADE,
+        related_name='retraits_epargne', verbose_name='Session',
+    )
+    montant = models.DecimalField(
+        max_digits=12, decimal_places=2,
+        validators=[MinValueValidator(Decimal('1'))],
+        verbose_name='Montant du retrait (FCFA)',
+    )
+    statut = models.CharField(
+        max_length=20, choices=STATUT_CHOICES,
+        default='EN_ATTENTE', verbose_name='Statut',
+    )
+    motif = models.TextField(blank=True, verbose_name='Motif du retrait')
+    notes_admin = models.TextField(blank=True, verbose_name="Notes de l'administrateur")
+    date_demande = models.DateTimeField(auto_now_add=True, verbose_name='Date de la demande')
+    date_traitement = models.DateTimeField(null=True, blank=True, verbose_name='Date de traitement')
+    epargne_transaction = models.OneToOneField(
+        'transactions.EpargneTransaction',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='retrait_source',
+        verbose_name="Transaction d'épargne liée",
+    )
+
+    class Meta:
+        verbose_name = "Retrait d'épargne"
+        verbose_name_plural = "Retraits d'épargne"
+        ordering = ['-date_demande']
+
+    def __str__(self):
+        return (
+            f"{self.membre.numero_membre} – Retrait {self.montant:,.0f} FCFA "
+            f"[{self.get_statut_display()}]"
+        )
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        if self.pk:
+            ancien = RetraitEpargne.objects.filter(pk=self.pk).first()
+            if ancien and ancien.statut == 'EN_ATTENTE' and self.statut == 'APPROUVE':
+                epargne_dispo = self.membre.calculer_epargne_pure()
+                if self.montant > epargne_dispo:
+                    raise ValidationError(
+                        f"Épargne insuffisante. Disponible : {epargne_dispo:,.0f} FCFA, "
+                        f"Demandé : {self.montant:,.0f} FCFA."
+                    )
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            ancien = RetraitEpargne.objects.filter(pk=self.pk).first()
+            if ancien and ancien.statut == 'EN_ATTENTE' and self.statut == 'APPROUVE':
+                from django.utils import timezone
+                if not self.epargne_transaction:
+                    epargne_tx = EpargneTransaction.objects.create(
+                        membre=self.membre,
+                        type_transaction='RETRAIT_EPARGNE',
+                        montant=-self.montant,
+                        session=self.session,
+                        notes=f"Retrait épargne approuvé – Demande #{self.id}",
+                    )
+                    self.epargne_transaction = epargne_tx
+                    self.date_traitement = timezone.now()
         super().save(*args, **kwargs)
 
 
