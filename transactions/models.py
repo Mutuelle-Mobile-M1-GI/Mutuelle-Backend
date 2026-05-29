@@ -416,6 +416,7 @@ class Emprunt(models.Model):
                 
                 # Calcul de la retenue (3% de 100 000 = 3 000)
                 interet_retenu = (nominal_demande * self.taux_interet) / Decimal('100')
+                interet_retenu = interet_retenu.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
                 
                 # MISE À JOUR DES CHAMPS :
                 # 1. La dette totale est le montant nominal (100 000)

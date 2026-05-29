@@ -3,6 +3,7 @@ djangorestframework
 django-filter
 django-cors-headers
 djangorestframework-simplejwt
+drf-spectacular
 pillow
 python-decouple
 whitenoise
