@@ -10,9 +10,8 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AddField(
-            model_name='membre',
-            name='actif',
-            field=models.BooleanField(default=True, help_text='False si le membre ne fait plus partie de la mutuelle', verbose_name='Membre actif'),
+        migrations.RunSQL(
+            sql="ALTER TABLE core_membre ADD COLUMN IF NOT EXISTS actif boolean DEFAULT true;",
+            reverse_sql="ALTER TABLE core_membre DROP COLUMN IF EXISTS actif;"
         ),
     ]
