@@ -307,6 +307,7 @@ class Exercice(models.Model):
                 print(f"🔄 Fallback: date_fin = {self.date_fin} (12 mois par défaut)")
         
         # 🔒 TRANSACTION ATOMIQUE : Tout réussit ou tout échoue
+        previous_current_exercice = None
         with transaction.atomic():
             # ✅ SI C'EST UN NOUVEL EXERCICE AVEC STATUT EN_COURS
             if is_new and self.statut == 'EN_COURS':
@@ -358,18 +359,24 @@ class Exercice(models.Model):
             super().save(*args, **kwargs)
             print(f"✅ Exercice {self.nom} sauvegardé avec statut {self.statut}")
             
-            # ✅ SI C'EST UN NOUVEL EXERCICE EN_COURS: Réinitialiser statuts des membres
-            if is_new and self.statut == 'EN_COURS':
-                # 3️⃣ Réinitialiser le statut de tous les membres à EN_REGLE
+            # ✅ TRANSITION D'EXERCICE: Conserver les statuts existants
+            # Première exercice → tous EN_REGLE (ce sont les statuts par défaut)
+            # Exercices suivants → conserve les statuts (EN_REGLE ou NON_EN_REGLE de l'exercice précédent)
+            first_exercice = previous_current_exercice is None
+            if is_new and self.statut == 'EN_COURS' and first_exercice:
+                # Premier exercice: initialiser tous les membres à EN_REGLE (statut par défaut)
                 try:
                     nombre_membres_modifies = Membre.objects.all().update(statut='EN_REGLE')
-                    print(f"✅ Statuts de {nombre_membres_modifies} membres réinitialisés à 'EN_REGLE'")
+                    print(f"✅ Premier exercice: Tous les {nombre_membres_modifies} membres remis à EN_REGLE")
                 except Exception as e:
-                    print(f"❌ ERREUR lors de la réinitialisation des statuts des membres: {e}")
+                    print(f"❌ ERREUR lors de l'initialisation des statuts: {e}")
                     raise ValidationError(
-                        f"❌ IMPOSSIBLE DE RÉINITIALISER LES STATUTS DES MEMBRES\n"
+                        f"❌ IMPOSSIBLE D'INITIALISER LES STATUTS DES MEMBRES\n"
                         f"   {str(e)}"
                     )
+            elif is_new and self.statut == 'EN_COURS' and not first_exercice:
+                # Exercice suivant: conserver les statuts existants (EN_REGLE/NON_EN_REGLE)
+                print(f"✅ Exercice suivant: Statuts des membres conservés (période de grâce sélective)")
             
             # ✅ SI C'EST UN NOUVEL EXERCICE EN_COURS: Dupliquer le FondsSocial
             if is_new and self.statut == 'EN_COURS':
@@ -1068,11 +1075,9 @@ class Session(models.Model):
                 peut_definir_statuts = Membre.peut_definir_statuts_membre(membre)
                 
                 if not peut_definir_statuts:
-                    # Période de grâce: tous les membres sont EN_REGLE
-                    if membre.statut != 'EN_REGLE':
-                        membre.statut = 'EN_REGLE'
-                        membre.save()
-                        print(f"⏳ {membre.numero_membre}: Période de grâce → EN_REGLE")
+                    # Période de grâce ou transition: conserver le statut actuel du membre
+                    # (On ne force plus EN_REGLE pour éviter d'effacer les dettes de l'exercice précédent)
+                    print(f"⏳ {membre.numero_membre}: Statut maintenu durant transition/grâce ({membre.statut})")
                     continue
                 
                 # Après période de grâce: évaluation normale
@@ -1383,12 +1388,12 @@ class Membre(models.Model):
     @classmethod
     def peut_definir_statuts_membre(cls, membre):
         """
-        ✅ NOUVELLE LOGIQUE: Période de grâce de 3 sessions par exercice
+        ✅ NOUVELLE LOGIQUE: Période de grâce SÉLECTIVE par statut d'exercice précédent
 
         Règles:
-        - Au début de chaque exercice: tous les membres sont EN_REGLE
-        - Période de grâce: 3 sessions avant d'évaluer les statuts
-        - Après 3 sessions: évaluation selon les critères normaux
+        - Membres EN_REGLE de l'exercice précédent → bénéficient d'une période de grâce de 3 sessions
+        - Membres NON_EN_REGLE de l'exercice précédent → PAS de période de grâce, réévaluation immédiate
+        - Après 3 sessions: évaluation selon les critères normaux pour tous
         """
         from core.models import Exercice, Session
         from django.utils import timezone
@@ -1399,24 +1404,35 @@ class Membre(models.Model):
             print(f"⏳ Membre {membre.numero_membre}: Pas d'exercice EN_COURS")
             return False
 
-        # Compter le nombre de sessions terminées dans cet exercice
-        sessions_terminees = Session.objects.filter(
-            exercice=exercice_actuel,
-            statut='TERMINEE'
-        ).count()
-
-        # Période de grâce = 3 sessions
-        PERIODE_GRACE_SESSIONS = 3
-
-        if sessions_terminees < PERIODE_GRACE_SESSIONS:
-            # Encore dans la période de grâce
-            sessions_restantes = PERIODE_GRACE_SESSIONS - sessions_terminees
-            print(f"⏳ Membre {membre.numero_membre}: Période de grâce ({sessions_restantes} session(s) restante(s) sur {PERIODE_GRACE_SESSIONS})")
-            return False
-        else:
-            # Période de grâce terminée, on peut évaluer
-            print(f"✅ Membre {membre.numero_membre}: Période de grâce terminée ({sessions_terminees} sessions terminées), évaluation possible")
+        # ✅ SI MEMBRE NON_EN_REGLE: PAS DE PÉRIODE DE GRÂCE
+        if membre.statut == 'NON_EN_REGLE':
+            print(f"❌ Membre {membre.numero_membre}: NON_EN_REGLE, pas de période de grâce → réévaluation immédiate")
             return True
+
+        # ✅ SI MEMBRE EN_REGLE: APPLIQUER PÉRIODE DE GRÂCE
+        if membre.statut == 'EN_REGLE':
+            # Compter le nombre de sessions terminées dans cet exercice
+            sessions_terminees = Session.objects.filter(
+                exercice=exercice_actuel,
+                statut='TERMINEE'
+            ).count()
+
+            # Période de grâce = 3 sessions
+            PERIODE_GRACE_SESSIONS = 3
+
+            if sessions_terminees < PERIODE_GRACE_SESSIONS:
+                # Encore dans la période de grâce
+                sessions_restantes = PERIODE_GRACE_SESSIONS - sessions_terminees
+                print(f"⏳ Membre {membre.numero_membre}: EN_REGLE, période de grâce ({sessions_restantes} session(s) restante(s) sur {PERIODE_GRACE_SESSIONS})")
+                return False
+            else:
+                # Période de grâce terminée, on peut évaluer
+                print(f"✅ Membre {membre.numero_membre}: EN_REGLE, période de grâce terminée ({sessions_terminees} sessions), évaluation possible")
+                return True
+
+        # Fallback (ne devrait pas arriver ici)
+        print(f"⚠️  Membre {membre.numero_membre}: Statut inconnu '{membre.statut}'")
+        return True
 
 
 

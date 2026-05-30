@@ -145,59 +145,51 @@ def calculer_donnees_membre_completes(membre):
                                    if montant_total_inscription > 0 else 0
     }
     
-    # 2. SOLIDARITÉ (EXERCICE ENTIER, PAIEMENTS PAR TRANCHE)
+    # 2. SOLIDARITÉ (logique LIFETIME)
+    # La solidarité est un paiement unique à vie. On se base sur le flag
+    # `membre.solidarite_terminee` pour déterminer si la solidarité est à jour.
     solidarite_data = {}
 
     exercice_courant = Exercice.get_exercice_en_cours()
-    if exercice_courant:
-        # Montant de base de la solidarité (config)
-        montant_solidarite_base = config.montant_solidarite
+    # Montant de base de la solidarité (config)
+    montant_solidarite_base = config.montant_solidarite
 
-        # Vérifier s'il y a un report (dette ou surplus) de l'exercice précédent
-        from core.models import SolidariteExerciceReport
-        report = SolidariteExerciceReport.objects.filter(
-            membre=membre,
-            exercice_cible=exercice_courant
-        ).first()
+    # Total payé TOUTES sessions confondues (solidarité = paiement à vie)
+    total_solidarite_payee = PaiementSolidarite.objects.filter(
+        membre=membre
+    ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
 
-        montant_reporte = report.montant_reporte if report else Decimal('0')
-        # total_solidarite_due = base + dette reportée - surplus reporté (min 0)
-        total_solidarite_due = max(montant_solidarite_base + montant_reporte, Decimal('0'))
+    # Ne plus utiliser les reports pour déterminer si la solidarité est à jour.
+    # On conserve les reports pour l'historique comptable si nécessaire,
+    # mais ils n'affectent pas le flag `solidarite_terminee`.
+    montant_reporte = Decimal('0')
+    total_solidarite_due = montant_solidarite_base
 
-        total_solidarite_payee = PaiementSolidarite.objects.filter(
-            membre=membre,
-            session__exercice=exercice_courant
-        ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+    # Assurer que le flag est à jour en appelant la méthode (ne sauvegarde pas)
+    try:
+        membre.update_solidarite_terminee()
+    except Exception:
+        pass
 
+    solidarite_data.update({
+        'exercice': exercice_courant.nom if exercice_courant else None,
+        'montant_solidarite_base': montant_solidarite_base,
+        'montant_reporte': montant_reporte,  # reports non utilisés pour le statut
+        'total_solidarite_due': total_solidarite_due,
+        'total_solidarite_payee': total_solidarite_payee,
+        'dette_solidarite_cumul': max(total_solidarite_due - total_solidarite_payee, Decimal('0')),
+        'solidarite_a_jour': membre.solidarite_terminee
+    })
+
+    if session_courante:
         solidarite_data.update({
-            'exercice': exercice_courant.nom,
-            'montant_solidarite_base': montant_solidarite_base,
-            'montant_reporte': montant_reporte,  # + = dette, - = surplus
-            'total_solidarite_due': montant_solidarite_base,
-            'total_solidarite_payee': total_solidarite_payee,
-            'dette_solidarite_cumul': max(total_solidarite_due - total_solidarite_payee, Decimal('0')),
-            'solidarite_a_jour': total_solidarite_payee >= total_solidarite_due
-        })
-
-        if session_courante:
-            solidarite_data.update({
-                'montant_solidarite_session_courante': max(total_solidarite_due - total_solidarite_payee, Decimal('0')),
-                'montant_paye_session_courante': PaiementSolidarite.objects.filter(
-                    membre=membre,
-                    session=session_courante
-                ).aggregate(total=Sum('montant'))['total'] or Decimal('0'),
-                'montant_restant_session_courante': max(total_solidarite_due - total_solidarite_payee, Decimal('0')),
-                'solidarite_session_courante_complete': total_solidarite_payee >= total_solidarite_due
-            })
-    else:
-        solidarite_data.update({
-            'exercice': None,
-            'montant_solidarite_base': Decimal('0'),
-            'montant_reporte': Decimal('0'),
-            'total_solidarite_due': Decimal('0'),
-            'total_solidarite_payee': Decimal('0'),
-            'dette_solidarite_cumul': Decimal('0'),
-            'solidarite_a_jour': False
+            'montant_solidarite_session_courante': max(total_solidarite_due - total_solidarite_payee, Decimal('0')),
+            'montant_paye_session_courante': PaiementSolidarite.objects.filter(
+                membre=membre,
+                session=session_courante
+            ).aggregate(total=Sum('montant'))['total'] or Decimal('0'),
+            'montant_restant_session_courante': max(total_solidarite_due - total_solidarite_payee, Decimal('0')),
+            'solidarite_session_courante_complete': membre.solidarite_terminee
         })
 
     
@@ -303,9 +295,9 @@ def calculer_donnees_membre_completes(membre):
     peut_definir_statuts = Membre.peut_definir_statuts_membre(membre)
     
     if not peut_definir_statuts:
-        # Période de grâce: tous les membres sont EN_REGLE
-        en_regle = True
-        print(f"⏳ Membre {membre.numero_membre}: Période de grâce → EN_REGLE par défaut")
+        # Période de grâce: conserver le statut existant du membre
+        en_regle = membre.statut == 'EN_REGLE'
+        print(f"⏳ Membre {membre.numero_membre}: Période de grâce → maintien du statut {membre.statut}")
     else:
         # Après 3 mois: évaluation selon les critères
         if solidarite_data['solidarite_a_jour']:
