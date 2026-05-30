@@ -2130,6 +2130,6 @@ class RetraitEpargneViewSet(viewsets.ModelViewSet):
             return Response({"error": "Membre introuvable."}, status=status.HTTP_404_NOT_FOUND)
         return Response({
             "membre_id":          str(membre.id),
-            "numero_membre":      membre.numero_embre,
+            "numero_membre":      membre.numero_membre,
             "epargne_disponible": float(membre.calculer_epargne_pure()),
         })
