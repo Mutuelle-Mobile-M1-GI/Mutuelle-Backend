@@ -60,7 +60,7 @@ def run_import():
             'last_name': last_name,
             'telephone': '+23700000000', # Valeur par défaut
             'role': 'MEMBRE',
-            'statut': 'NON_DEFINI'
+            'statut': 'NON_EN_REGLE'
         })
 
     print(f"🚀 Lancement de l'importation de {len(members_data)} membres...")

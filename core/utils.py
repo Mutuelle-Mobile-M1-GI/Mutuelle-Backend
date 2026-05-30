@@ -31,7 +31,7 @@ def calculer_cumul_epargnes_total():
     from decimal import Decimal
     
     total_tresor = Decimal('0')
-    membres_actifs = Membre.objects.filter(statut__in=['EN_REGLE', 'NON_EN_REGLE', 'NON_DEFINI'])
+    membres_actifs = Membre.objects.filter(statut__in=['EN_REGLE', 'NON_EN_REGLE'])
     
     for membre in membres_actifs:
         # On utilise solde_total_global qui fait : calculer_epargne_pure + calculer_total_gains
@@ -312,17 +312,11 @@ def calculer_donnees_membre_completes(membre):
             print('✅ Solidarité à jour')
         else:
             print('❌ Solidarité pas à jour')
-            
-        if emprunt_data['montant_restant_a_rembourser'] < Decimal('100'):
-            print('✅ Emprunt restant < 100 FCFA')
-        else:
-            print('❌ Emprunt restant >= 100 FCFA')
 
         en_regle = (
             solidarite_data['solidarite_a_jour'] and
             renflouement_data['renflouement_a_jour'] and
-            inscription_data['inscription_complete'] and
-            emprunt_data['montant_restant_a_rembourser'] < Decimal('100')
+            inscription_data['inscription_complete']
         )
         print(f"✅ Membre {membre.numero_membre}: Évaluation après période de grâce = {en_regle}")
     

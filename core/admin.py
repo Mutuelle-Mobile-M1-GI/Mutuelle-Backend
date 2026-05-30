@@ -151,8 +151,7 @@ class MembreAdmin(admin.ModelAdmin):
     def statut_formate(self, obj):
         colors = {
             'EN_REGLE': 'green',
-            'NON_EN_REGLE': 'orange',
-            'SUSPENDU': 'red'
+            'NON_EN_REGLE': 'orange'
         }
         color = colors.get(obj.statut, 'black')
         return format_html(

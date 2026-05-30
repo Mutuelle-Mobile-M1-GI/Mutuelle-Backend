@@ -360,10 +360,10 @@ class Exercice(models.Model):
             
             # ✅ SI C'EST UN NOUVEL EXERCICE EN_COURS: Réinitialiser statuts des membres
             if is_new and self.statut == 'EN_COURS':
-                # 3️⃣ Réinitialiser le statut de tous les membres à NON_DEFINI
+                # 3️⃣ Réinitialiser le statut de tous les membres à EN_REGLE
                 try:
-                    nombre_membres_modifies = Membre.objects.all().update(statut='NON_DEFINI')
-                    print(f"✅ Statuts de {nombre_membres_modifies} membres réinitialisés à 'NON_DEFINI'")
+                    nombre_membres_modifies = Membre.objects.all().update(statut='EN_REGLE')
+                    print(f"✅ Statuts de {nombre_membres_modifies} membres réinitialisés à 'EN_REGLE'")
                 except Exception as e:
                     print(f"❌ ERREUR lors de la réinitialisation des statuts des membres: {e}")
                     raise ValidationError(
@@ -608,7 +608,7 @@ class Exercice(models.Model):
                 ).count()
                 
                 membres_non_en_regle = Membre.objects.filter(
-                    statut__in=['NON_EN_REGLE', 'NON_DEFINI'], actif=True
+                    statut='NON_EN_REGLE', actif=True
                 ).count()
                 
                 membres_total = membres_en_regle + membres_non_en_regle
@@ -1037,7 +1037,7 @@ class Session(models.Model):
         """
         from django.db import transaction
         
-        membres = cls.objects.exclude(statut='SUSPENDU')
+        membres = cls.objects.all()
         
         print(f"🔄 Initialisation des statuts pour nouvel exercice: {membres.count()} membres")
         
@@ -1058,7 +1058,7 @@ class Session(models.Model):
         from core.models import Membre
         from django.db import transaction
 
-        membres = Membre.objects.exclude(statut='SUSPENDU')
+        membres = Membre.objects.all()
 
         print(f"🔄 Mise à jour des statuts pour {membres.count()} membres")
 
@@ -1200,15 +1200,13 @@ class Membre(models.Model):
     STATUS_CHOICES = [
         ('EN_REGLE', 'En règle'),
         ('NON_EN_REGLE', 'Non en règle'),
-        ('SUSPENDU', 'Suspendu'),
-        ('NON_DEFINI', 'Non defini'),
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     utilisateur = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='membre_profile')
     numero_membre = models.CharField(max_length=20, unique=True, verbose_name="Numéro de membre")
     date_inscription = models.DateField(verbose_name="Date d'inscription")
-    statut = models.CharField(max_length=15, choices=STATUS_CHOICES, default='NON_DEFINI', verbose_name="Statut")
+    statut = models.CharField(max_length=15, choices=STATUS_CHOICES, default='EN_REGLE', verbose_name="Statut")
     exercice_inscription = models.ForeignKey(Exercice, on_delete=models.CASCADE, related_name='nouveaux_membres', verbose_name="Exercice d'inscription")
     session_inscription = models.ForeignKey(Session, on_delete=models.CASCADE, related_name='nouveaux_membres', verbose_name="Session d'inscription")
     date_creation = models.DateTimeField(auto_now_add=True)
