@@ -182,8 +182,8 @@ Vérification épargne disponible
 3. Afficher la liste des retraits d'un membre
    └─→ GET /par_membre/?membre_id=
 
-4. Vérifier le trésor mis à jour
-   └─→ GET /epargne-transactions/statistiques/
+4. (Optionnel) Vérifier les statistiques du trésor
+   └─→ GET /epargne-transactions/statistiques/ (endpoint distinct)
 ```
 
 ---
