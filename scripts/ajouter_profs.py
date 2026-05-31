@@ -36,7 +36,7 @@ MEMBERS_LIST = [
     ("C.M.", "NGABIRENG"), ("Jean", "NGANHOU"), ("NGNIKAM", "NGNIKAM"),
     ("Paul S.", "NGOHE-EKAM"), ("RACHEL", "NGONO"), ("GUY MERLIN", "NGOUNOU"),
     ("N. Hippolyte", "NTEDE"), ("G. Raïssa", "ONANENA"), ("CHREPIN", "PETTANG"),
-    ("NANA JOYCE", "PETTANG"), ("Jacques", "TAGOUD JEU"), ("Etienne", "TAKOU"),
+    ("NANA JOYCE", "PETTANG"), ("Jacques", "TAGOUDJEU"), ("Etienne", "TAKOU"),
     ("Hervé", "TALE KALACHI"), ("André", "TALLA"), ("T. Thomas", "TAMO"),
     ("Emmanuel", "TCHOMGO"), ("Théodore", "TCHOTANG"), ("Jean Jules", "TEWA"),
     ("Alain", "TIEDEU"), ("Lauraine", "TIOGNING"), ("Olivier", "VIDEME"),
@@ -51,7 +51,7 @@ def run_import():
         clean_first = slugify_name(first_name)
         clean_last = slugify_name(last_name)
         username = f"{clean_first}.{clean_last}"[:30] # Limite Django username
-        email = f"{clean_first}@mutuelle.com"
+        email = f"{clean_first}.{clean_last}@mutuelle.com"
         
         members_data.append({
             'email': email,
