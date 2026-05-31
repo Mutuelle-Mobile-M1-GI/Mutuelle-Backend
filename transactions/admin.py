@@ -1,10 +1,12 @@
 from django.contrib import admin
 from django.db.models import Sum
 from django.utils.html import format_html
+from django.utils import timezone
+from django.core.exceptions import ValidationError
 from .models import (
     PaiementInscription, PaiementSolidarite, EpargneTransaction,
     Emprunt, Remboursement, AssistanceAccordee, Renflouement,
-    PaiementRenflouement
+    PaiementRenflouement, RetraitEpargne
 )
 
 @admin.register(PaiementInscription)
@@ -431,7 +433,50 @@ class PaiementRenflouementAdmin(admin.ModelAdmin):
         return obj.session.nom
     session_nom.short_description = 'Session'
     
-    
+from django.utils import timezone
+
+@admin.register(RetraitEpargne)
+class RetraitEpargneAdmin(admin.ModelAdmin):
+    list_display = ['membre', 'montant', 'date_retrait', 'epargne_transaction']
+    list_filter  = ['session']
+    search_fields = ['membre__numero_membre']
+    readonly_fields = ['date_retrait', 'epargne_transaction']
+
+    def save_model(self, request, obj, form, change):
+        if not change:  # Seulement à la création
+            epargne_dispo = obj.membre.calculer_epargne_pure()
+            if obj.montant > epargne_dispo:
+                self.message_user(
+                    request,
+                    f"❌ Épargne insuffisante. Disponible : {epargne_dispo:,.0f} FCFA, "
+                    f"Demandé : {obj.montant:,.0f} FCFA.",
+                    level='ERROR'
+                )
+                return
+
+            import uuid as uuid_lib
+            from django.db import connection
+            tx_id = uuid_lib.uuid4().hex
+            now = timezone.now()
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    INSERT INTO transactions_epargnetransaction
+                    (id, membre_id, session_id, type_transaction, montant, notes, date_transaction)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """, [
+                    tx_id,
+                    obj.membre.id.hex,
+                    obj.session.id.hex,
+                    'RETRAIT_EPARGNE',
+                    float(-obj.montant),
+                    f"Retrait épargne – {obj.motif}",
+                    now,
+                ])
+            epargne_tx = EpargneTransaction.objects.get(id=tx_id)
+            obj.epargne_transaction = epargne_tx
+
+        super().save_model(request, obj, form, change)
+#ici  
     
     
 

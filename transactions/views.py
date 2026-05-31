@@ -21,7 +21,9 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.db.models import Sum, Q, DecimalField
 from django.db.models.functions import Coalesce  # <--- C'est cette ligne qu'il te manque
-
+from .models import RetraitEpargne
+from .serializers import RetraitEpargneSerializer
+from django.db import transaction as db_transaction
 logger = logging.getLogger(__name__)
 
 logger = logging.getLogger(__name__)
@@ -1831,6 +1833,8 @@ class RepartitionRenflouementExerciceViewSet(viewsets.ModelViewSet):
         })
 
 
+
+
 class RenflouementProportionnelViewSet(viewsets.ModelViewSet):
     """
     ViewSet spécialisé pour les renflouements avec système proportionnel
@@ -2031,4 +2035,101 @@ class PaiementRenflouementProportionnelViewSet(viewsets.ModelViewSet):
             'exercice_id': exercice_id,
             'statistiques': stats,
             'paiements': self.get_serializer(paiements, many=True).data
+        })
+
+class RetraitEpargneFilter(filters.FilterSet):
+    membre        = filters.UUIDFilter()
+    membre_numero = filters.CharFilter(field_name='membre__numero_membre', lookup_expr='icontains')
+    session       = filters.UUIDFilter()
+    statut        = filters.ChoiceFilter(choices=[
+        ('EN_ATTENTE', 'En attente'),
+        ('APPROUVE',   'Approuvé'),
+        ('REJETE',     'Rejeté'),
+    ])
+    date_min    = filters.DateFilter(field_name='date_demande', lookup_expr='gte')
+    date_max    = filters.DateFilter(field_name='date_demande', lookup_expr='lte')
+    montant_min = filters.NumberFilter(field_name='montant', lookup_expr='gte')
+    montant_max = filters.NumberFilter(field_name='montant', lookup_expr='lte')
+
+    class Meta:
+        model  = RetraitEpargne
+        fields = ['membre', 'session', 'statut']
+
+
+class RetraitEpargneViewSet(viewsets.ModelViewSet):
+    queryset = RetraitEpargne.objects.select_related(
+        'membre__utilisateur', 'session', 'epargne_transaction'
+    ).all()
+    serializer_class   = RetraitEpargneSerializer
+    filterset_class    = RetraitEpargneFilter
+    permission_classes = [IsAdministrateur]  # Seul l'admin
+    ordering_fields    = ['date_retrait', 'montant']
+    ordering           = ['-date_retrait']
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        membre  = serializer.validated_data['membre']
+        montant = serializer.validated_data['montant']
+
+        epargne_dispo = membre.calculer_epargne_pure()
+        if montant > epargne_dispo:
+            return Response(
+                {"error": "Épargne insuffisante.",
+                 "epargne_disponible": float(epargne_dispo),
+                 "montant_demande": float(montant)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with db_transaction.atomic():
+            import uuid as uuid_lib
+            from django.db import connection
+            tx_id = uuid_lib.uuid4().hex
+            now = timezone.now()
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    INSERT INTO transactions_epargnetransaction
+                    (id, membre_id, session_id, type_transaction, montant, notes, date_transaction)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """, [
+                    tx_id,
+                    membre.id.hex,
+                    serializer.validated_data['session'].id.hex,
+                    'RETRAIT_EPARGNE',
+                    float(-montant),
+                    f"Retrait épargne – {serializer.validated_data.get('motif', '')}",
+                    now,
+                ])
+            epargne_tx = EpargneTransaction.objects.get(id=tx_id)
+            retrait = serializer.save(epargne_transaction=epargne_tx)
+
+        return Response(self.get_serializer(retrait).data, status=status.HTTP_201_CREATED)
+
+    def update(self, request, *args, **kwargs):
+        return Response(
+            {"error": "Un retrait ne peut pas être modifié."},
+            status=status.HTTP_405_METHOD_NOT_ALLOWED
+        )
+
+    @action(detail=False, methods=['get'], permission_classes=[IsAdministrateur])
+    def par_membre(self, request):
+        membre_id = request.query_params.get('membre_id')
+        if not membre_id:
+            return Response({"error": "Le paramètre 'membre_id' est requis."}, status=status.HTTP_400_BAD_REQUEST)
+        qs = self.get_queryset().filter(membre__id=membre_id)
+        return Response(self.get_serializer(qs, many=True).data)
+
+    @action(detail=False, methods=['get'], permission_classes=[IsAdministrateur])
+    def epargne_disponible(self, request):
+        membre_id = request.query_params.get('membre_id')
+        if not membre_id:
+            return Response({"error": "Le paramètre 'membre_id' est requis."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            membre = Membre.objects.get(id=membre_id)
+        except Membre.DoesNotExist:
+            return Response({"error": "Membre introuvable."}, status=status.HTTP_404_NOT_FOUND)
+        return Response({
+            "membre_id":          str(membre.id),
+            "numero_membre":      membre.numero_membre,
+            "epargne_disponible": float(membre.calculer_epargne_pure()),
         })

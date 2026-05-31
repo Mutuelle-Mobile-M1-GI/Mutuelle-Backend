@@ -626,13 +626,11 @@ class MembreViewSet(viewsets.ModelViewSet):
         total = self.get_queryset().count()
         en_regle = self.get_queryset().filter(statut='EN_REGLE').count()
         non_en_regle = self.get_queryset().filter(statut='NON_EN_REGLE').count()
-        suspendus = self.get_queryset().filter(statut='SUSPENDU').count()
         
         return Response({
             'total_membres': total,
             'membres_en_regle': en_regle,
             'membres_non_en_regle': non_en_regle,
-            'membres_suspendus': suspendus,
             'pourcentage_en_regle': (en_regle / total * 100) if total > 0 else 0
         })
     

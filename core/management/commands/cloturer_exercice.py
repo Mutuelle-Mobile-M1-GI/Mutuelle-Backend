@@ -69,6 +69,9 @@ class Command(BaseCommand):
                 self.stdout.write(
                     self.style.SUCCESS(f'✅ Exercice {exercice.nom} marqué comme TERMINÉ')
                 )
+                self.stdout.write(
+                    self.style.SUCCESS('ℹ️  Les statuts des membres ont été transférés vers l\'exercice suivant')
+                )
                 
                 # 3. Afficher le résumé
                 self.stdout.write('\n' + '=' * 70)

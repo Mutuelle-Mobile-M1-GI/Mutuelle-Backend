@@ -963,7 +963,7 @@ class GestionMembresViewSet(viewsets.ViewSet):
                     date_inscription=serializer.validated_data.get('date_inscription', timezone.now().date()),
                     exercice_inscription=exercice_actuel,
                     session_inscription=session_actuelle,
-                    statut = 'NON_DEFINI'  # Par défaut
+                    statut = 'EN_REGLE'  # Par défaut
                 )
                 
                 # 3. Optionnel : ajouter un paiement d'inscription initial
@@ -1001,7 +1001,7 @@ class GestionMembresViewSet(viewsets.ViewSet):
                             membre.statut = 'NON_EN_REGLE'
                     else:
                         # Inscription incomplète
-                        membre.statut = 'NON_DEFINI'
+                        membre.statut = 'EN_REGLE'
                     
                     membre.save()
                 

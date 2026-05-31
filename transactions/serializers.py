@@ -590,6 +590,54 @@ class PaiementRenflouementSerializer(serializers.ModelSerializer):
             'formule': f'{obj.montant:,.0f} × {obj.ratio_caisse_utilise}% = {obj.montant_caisse_inscription:,.0f} | {obj.montant:,.0f} × {obj.ratio_fonds_utilise}% = {obj.montant_fonds_social:,.0f}'
         }
 
+from .models import RetraitEpargne
+
+class RetraitEpargneSerializer(serializers.ModelSerializer):
+    membre_info        = serializers.SerializerMethodField(read_only=True)
+    session_nom        = serializers.CharField(source='session.nom', read_only=True)
+    epargne_disponible = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model  = RetraitEpargne
+        fields = [
+            'id', 'membre', 'membre_info',
+            'session', 'session_nom',
+            'montant', 'motif',
+            'date_retrait', 'epargne_disponible',
+            'epargne_transaction',
+        ]
+        read_only_fields = ['id', 'date_retrait', 'epargne_transaction']
+        extra_kwargs = {
+            'motif': {'required': False, 'allow_blank': True},
+        }
+
+    def get_membre_info(self, obj):
+        m = obj.membre
+        nom = "Inconnu"
+        if m.utilisateur:
+            nom = (
+                getattr(m.utilisateur, 'nom_complet', None)
+                or f"{m.utilisateur.first_name} {m.utilisateur.last_name}".strip()
+                or m.utilisateur.username
+            )
+        return {"id": str(m.id), "numero_membre": m.numero_membre, "nom": nom}
+
+    def get_epargne_disponible(self, obj):
+        return float(obj.membre.calculer_epargne_pure())
+
+    def validate(self, attrs):
+        membre  = attrs.get('membre')  or getattr(self.instance, 'membre', None)
+        montant = attrs.get('montant') or getattr(self.instance, 'montant', Decimal('0'))
+        if membre and montant:
+            epargne_dispo = membre.calculer_epargne_pure()
+            if montant > epargne_dispo:
+                raise serializers.ValidationError({
+                    "montant": (
+                        f"Le montant demandé ({montant:,.0f} FCFA) dépasse "
+                        f"l'épargne disponible ({epargne_dispo:,.0f} FCFA)."
+                    )
+                })
+        return attrs
 
 class EmpruntDetailAvecPenalitesSerializer(serializers.ModelSerializer):
     """

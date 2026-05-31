@@ -338,13 +338,11 @@ class DonneesAdministrateurSerializer(serializers.Serializer):
         total_membres = Membre.objects.count()
         membres_en_regle = Membre.objects.filter(statut='EN_REGLE').count()
         membres_non_en_regle = Membre.objects.filter(statut='NON_EN_REGLE').count()
-        membres_suspendus = Membre.objects.filter(statut='SUSPENDU').count()
         
         return {
             'total': total_membres,
             'en_regle': membres_en_regle,
             'non_en_regle': membres_non_en_regle,
-            'suspendus': membres_suspendus,
             'pourcentage_en_regle': (membres_en_regle / total_membres * 100) if total_membres > 0 else 0
         }
     

@@ -18,7 +18,14 @@ router.register(r'emprunts-suivi', views.EmpruntDetailViewSet, basename='emprunt
 router.register(r'repartitions-renflouement', views.RepartitionRenflouementExerciceViewSet)
 router.register(r'renflouements-proportionnels', views.RenflouementProportionnelViewSet, basename='renflouement-proportionnel')
 router.register(r'paiements-renflouement-proportionnels', views.PaiementRenflouementProportionnelViewSet, basename='paiement-renflouement-proportionnel')
-
+#Endpoints retrait epargne
+# Dans le router
+router.register(r'retraits-epargne', views.RetraitEpargneViewSet)
+# Dans urlpatterns, avant include(router.urls)
+path('retraits-epargne/par_membre/', views.RetraitEpargneViewSet.as_view({'get': 'par_membre'}), name='retraits-par-membre'),
+path('retraits-epargne/epargne_disponible/', views.RetraitEpargneViewSet.as_view({'get': 'epargne_disponible'}), name='retraits-epargne-disponible'),
+path('retraits-epargne/<pk>/approuver/', views.RetraitEpargneViewSet.as_view({'post': 'approuver'}), name='retrait-approuver'),
+path('retraits-epargne/<pk>/rejeter/', views.RetraitEpargneViewSet.as_view({'post': 'rejeter'}), name='retrait-rejeter'),
 urlpatterns = [
     # 1. On intercepte l'URL des statistiques d'épargne AVANT que le router ne cherche un ID
     path('epargne-transactions/statistiques/', 

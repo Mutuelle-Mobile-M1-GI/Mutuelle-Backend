@@ -1378,6 +1378,7 @@ class EpargneTransaction(models.Model):
         ('RETRAIT_PRET', 'Retrait pour prêt'),
         ('AJOUT_INTERET', 'Ajout d\'intérêt'),
         ('RETOUR_REMBOURSEMENT', 'Retour de remboursement'),
+        ('RETRAIT_EPARGNE', 'Retrait épargne'),  # ← NOUVEAU
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -1415,6 +1416,38 @@ class EpargneTransaction(models.Model):
         self.full_clean()
         super().save(*args, **kwargs)
 
+class RetraitEpargne(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    membre = models.ForeignKey(
+        'core.Membre', on_delete=models.CASCADE,
+        related_name='retraits_epargne', verbose_name='Membre',
+    )
+    session = models.ForeignKey(
+        'core.Session', on_delete=models.CASCADE,
+        related_name='retraits_epargne', verbose_name='Session',
+    )
+    montant = models.DecimalField(
+        max_digits=12, decimal_places=2,
+        validators=[MinValueValidator(Decimal('1'))],
+        verbose_name='Montant du retrait (FCFA)',
+    )
+    motif = models.TextField(blank=True, verbose_name='Motif du retrait')
+    date_retrait = models.DateTimeField(auto_now_add=True, verbose_name='Date du retrait')
+    epargne_transaction = models.OneToOneField(
+        'transactions.EpargneTransaction',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='retrait_source',
+        verbose_name="Transaction d'épargne liée",
+    )
+
+    class Meta:
+        verbose_name = "Retrait d'épargne"
+        verbose_name_plural = "Retraits d'épargne"
+        ordering = ['-date_retrait']
+
+    def __str__(self):
+        return f"{self.membre.numero_membre} – Retrait {self.montant:,.0f} FCFA"
 
 class PenaliteEmprunt(models.Model):
     """

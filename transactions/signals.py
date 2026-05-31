@@ -36,6 +36,16 @@ def handle_paiement_post_save(sender, instance, created, **kwargs):
             
         # 2. Mise à jour du Statut du Membre (Logique de Régularisation)
         membre = instance.membre
+
+        # Mettre à jour le flag 'solidarite_terminee' (solidarité = paiement à vie)
+        try:
+            # met à jour l'attribut en mémoire
+            membre.update_solidarite_terminee()
+            # sauvegarde minimale pour persister le flag
+            membre.save(update_fields=['solidarite_terminee'])
+            print(f"SIGNAL INFO: solidarite_terminee mis à jour pour {membre.numero_membre} = {membre.solidarite_terminee}")
+        except Exception as e:
+            print(f"WARN: impossible de mettre à jour solidarite_terminee: {e}")
         
         # On suppose que calculer_statut_en_regle() vérifie si le membre a assez payé
         if membre.calculer_statut_en_regle():
