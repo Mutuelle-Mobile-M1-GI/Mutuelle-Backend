@@ -346,7 +346,7 @@ class EpargneTransactionViewSet(viewsets.ModelViewSet):
             ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
             
             total_sorties = EpargneTransaction.objects.filter(
-                type_transaction='RETRAIT_PRET',
+                type_transaction__in=['RETRAIT_PRET', 'RETRAIT_RENFLOUEMENT'],
                 montant__lt=0  # Sécurité : on prend les montants négatifs
             ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
             
@@ -1046,7 +1046,7 @@ class RenflouementViewSet(viewsets.ModelViewSet):
                 print(f"1️⃣ Création de la transaction d'épargne (retrait)...")
                 epargne_transaction = EpargneTransaction.objects.create(
                     membre=membre,
-                    type_transaction='RETRAIT_PRET',  # Utiliser RETRAIT_PRET comme type de retrait
+                    type_transaction='RETRAIT_RENFLOUEMENT',  # Utiliser RETRAIT_RENFLOUEMENT
                     montant=-montant_a_payer,  # Négatif pour indiquer un retrait
                     session=current_session,
                     notes=f"Retrait pour paiement renflouement: {notes}"

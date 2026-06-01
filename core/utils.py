@@ -61,7 +61,7 @@ def calculer_tresor_disponible():
     ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
     
     total_sorties = EpargneTransaction.objects.filter(
-        type_transaction='RETRAIT_PRET',
+        type_transaction__in=['RETRAIT_PRET', 'RETRAIT_RENFLOUEMENT'],
         montant__lt=0
     ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
     
@@ -116,7 +116,7 @@ def calculer_donnees_membre_completes(membre):
     from core.models import ConfigurationMutuelle, Session,Exercice
     from transactions.models import (
         PaiementInscription, PaiementSolidarite, EpargneTransaction,
-        Emprunt, Renflouement
+        Emprunt, Renflouement, RetraitEpargne
     )
     
     config = ConfigurationMutuelle.get_configuration()
@@ -213,15 +213,40 @@ def calculer_donnees_membre_completes(membre):
     ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
     
     epargne_totale = epargne_base + interets_recus
+
+    # Retraits d'épargne effectués (via RetraitEpargne + EpargneTransaction RETRAIT_EPARGNE)
+    total_retraits_epargne_model = RetraitEpargne.objects.filter(
+        membre=membre
+    ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+
+    total_retraits_epargne_tx = transactions_epargne.filter(
+        type_transaction='RETRAIT_EPARGNE'
+    ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+
+    # On prend le max des deux pour éviter le double-comptage
+    total_retraits_epargne = max(total_retraits_epargne_model, abs(total_retraits_epargne_tx))
+
+    # NOUVEAU: Retraits pour renflouement (via EpargneTransaction RETRAIT_RENFLOUEMENT)
+    total_retraits_renflouement = transactions_epargne.filter(
+        type_transaction='RETRAIT_RENFLOUEMENT'
+    ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+    total_retraits_renflouement = abs(total_retraits_renflouement)
     
+    # Calcul du bilan net (Épargne brute + Intérêts - Retraits - Renflouements)
+    # L'utilisateur souhaite finalement que bilan_epargne corresponde à epargne_totale
+    bilan_epargne = epargne_totale - total_retraits_renflouement - total_retraits_epargne
+
     epargne_data = {
         'epargne_base': epargne_base,
         'retraits_pour_prets': retraits_prets,
         'interets_recus': interets_recus,
         'retours_remboursements': retours_remboursements,
-        'epargne_totale': epargne_totale,
-        'epargne_plus_interets': epargne_totale,  # Dans notre cas, c'est la même chose
-        'montant_interets_separe': interets_recus
+        'epargne_totale': bilan_epargne, # Correspondance avec bilan_epargne
+        'epargne_plus_interets': epargne_totale, # Retour à la valeur brute épargne+intérêts
+        'montant_interets_separe': interets_recus,
+        'total_retraits_epargne': total_retraits_epargne,
+        'total_retraits_renflouement': total_retraits_renflouement,
+        'bilan_epargne': bilan_epargne,
     }
     
     # 4. EMPRUNTS

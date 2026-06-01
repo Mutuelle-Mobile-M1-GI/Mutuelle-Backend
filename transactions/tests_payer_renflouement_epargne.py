@@ -280,7 +280,7 @@ class PayerRenflouementAvecEpargneTestCase(TestCase):
         # Compter les transactions avant
         transactions_before = EpargneTransaction.objects.filter(
             membre=self.membre,
-            type_transaction='RETRAIT_PRET'
+            type_transaction='RETRAIT_RENFLOUEMENT'
         ).count()
         
         url = reverse('payer-renflouement-epargne', args=[self.renflouement.id])
@@ -303,7 +303,7 @@ class PayerRenflouementAvecEpargneTestCase(TestCase):
         # Compter les transactions après
         transactions_after = EpargneTransaction.objects.filter(
             membre=self.membre,
-            type_transaction='RETRAIT_PRET'
+            type_transaction='RETRAIT_RENFLOUEMENT'
         ).count()
         
         # Une transaction doit avoir été créée
@@ -312,7 +312,7 @@ class PayerRenflouementAvecEpargneTestCase(TestCase):
         # Vérifier les détails de la transaction
         nouvelle_transaction = EpargneTransaction.objects.filter(
             membre=self.membre,
-            type_transaction='RETRAIT_PRET'
+            type_transaction='RETRAIT_RENFLOUEMENT'
         ).order_by('-date_transaction').first()
         
         self.assertEqual(nouvelle_transaction.montant, Decimal('-50000.00'))
