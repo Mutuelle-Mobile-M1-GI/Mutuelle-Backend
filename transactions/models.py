@@ -1378,7 +1378,8 @@ class EpargneTransaction(models.Model):
         ('RETRAIT_PRET', 'Retrait pour prêt'),
         ('AJOUT_INTERET', 'Ajout d\'intérêt'),
         ('RETOUR_REMBOURSEMENT', 'Retour de remboursement'),
-        ('RETRAIT_EPARGNE', 'Retrait épargne'),  # ← NOUVEAU
+        ('RETRAIT_EPARGNE', 'Retrait épargne'),
+        ('RETRAIT_RENFLOUEMENT', 'Retrait pour renflouement'),  # ← NOUVEAU
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
