@@ -9,9 +9,12 @@ router.register(r'sessions', views.SessionViewSet)
 router.register(r'membres', views.MembreViewSet)
 router.register(r'types-assistance', views.TypeAssistanceViewSet)
 router.register(r'fonds-social', views.FondsSocialViewSet)
+router.register(r'caisse-inscription', views.CaisseInscriptionViewSet)
 router.register(r'emprunt-tiers', views.EmpruntCoefficientTierViewSet, basename='emprunt-tier')
 
 urlpatterns = [
     path('', include(router.urls)),
     path('donnees-administrateur/', views.donnees_administrateur, name='donnees_administrateur'),
+    path('scripts/initialize-assistance-types/', views.initialize_assistance_types, name='initialize_assistance_types'),
+    path('scripts/initialize-membres/', views.initialize_membres, name='initialize_membres'),
 ]

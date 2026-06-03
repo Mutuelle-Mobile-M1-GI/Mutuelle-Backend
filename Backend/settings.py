@@ -1,19 +1,27 @@
 import os
 from pathlib import Path
+from datetime import timedelta
+
+import dj_database_url
 from decouple import config
 
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
+# =========================
+# BASE
+# =========================
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = config('SECRET_KEY', default='django-insecure-change-me-in-production')
+# =========================
+# SECURITY
+# =========================
+SECRET_KEY = os.environ.get("SECRET_KEY", "unsafe-secret-key")
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = config('DEBUG', default=True, cast=bool)
+DEBUG = os.environ.get("DEBUG", "False") == "True"
 
-ALLOWED_HOSTS = ['*']  # Pour le développement, à restreindre en production
+ALLOWED_HOSTS = ["*", ".onrender.com"]
 
-# Application definition
+# =========================
+# APPLICATIONS
+# =========================
 DJANGO_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
@@ -28,6 +36,7 @@ THIRD_PARTY_APPS = [
     'rest_framework_simplejwt',
     'django_filters',
     'corsheaders',
+    'drf_spectacular',  # ✅ Ajout de drf_spectacular
 ]
 
 LOCAL_APPS = [
@@ -39,9 +48,14 @@ LOCAL_APPS = [
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 
+# =========================
+# MIDDLEWARE
+# =========================
 MIDDLEWARE = [
-    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
+
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -50,8 +64,15 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
+# =========================
+# URLS / WSGI
+# =========================
 ROOT_URLCONF = 'Backend.urls'
+WSGI_APPLICATION = 'Backend.wsgi.application'
 
+# =========================
+# TEMPLATES
+# =========================
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
@@ -68,61 +89,63 @@ TEMPLATES = [
     },
 ]
 
-WSGI_APPLICATION = 'Backend.wsgi.application'
+# =========================
+# DATABASE
+# =========================
 
-# Database
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
+    'default': dj_database_url.parse(
+        config('DATABASE_URL')
+    )
 }
 
-# Custom User Model
+# =========================
+# AUTH
+# =========================
 AUTH_USER_MODEL = 'authentication.Utilisateur'
 
-# Password validation
 AUTH_PASSWORD_VALIDATORS = [
-    {
-        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
-    },
+    {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
 ]
 
-# Internationalization
+# =========================
+# I18N
+# =========================
 LANGUAGE_CODE = 'fr'
 TIME_ZONE = 'Africa/Douala'
 USE_I18N = True
 USE_TZ = True
 
-# Static files (CSS, JavaScript, Images)
+# =========================
+# STATIC & MEDIA
+# =========================
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
-STATICFILES_DIRS = [BASE_DIR / 'static']
 
-# Media files (user uploads)
+STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
-# Default primary key field type
+# =========================
+# DEFAULT PK
+# =========================
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# Django REST Framework configuration
+# =========================
+# DJANGO REST FRAMEWORK
+# =========================
 REST_FRAMEWORK = {
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework_simplejwt.authentication.JWTAuthentication',
         'rest_framework.authentication.SessionAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
-        'rest_framework.permissions.AllowAny',  # Par défaut AllowAny comme spécifié
+        'rest_framework.permissions.AllowAny',
     ],
     'DEFAULT_FILTER_BACKENDS': [
         'django_filters.rest_framework.DjangoFilterBackend',
@@ -131,10 +154,17 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 100,
-    'DEFAULT_RENDERER_CLASSES': [
-        'rest_framework.renderers.JSONRenderer',
-        'rest_framework.renderers.BrowsableAPIRenderer',
-    ],
+}
+
+# ✅ Configuration drf_spectacular pour Swagger
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Mutuelle API',
+    'DESCRIPTION': 'API de gestion de mutuelle avec fonctionnalités complètes',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    'SCHEMA_PATH_PREFIX': '/api/',
+    'COMPONENT_SPLIT_REQUEST': True,
+    'SORT_OPERATIONS': False,
 }
 
 # JWT Configuration
@@ -147,14 +177,14 @@ SIMPLE_JWT = {
     'TOKEN_OBTAIN_SERIALIZER': 'authentication.serializers.CustomTokenObtainPairSerializer',
 }
 
-# CORS settings (pour React Native)
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-]
-CORS_ALLOW_ALL_ORIGINS = True  # Pour le développement
+# =========================
+# CORS
+# =========================
+CORS_ALLOW_ALL_ORIGINS = True  # OK pour Render + API publique
 
-# Paramètres par défaut de la mutuelle (peuvent être modifiés via l'admin)
+# =========================
+# PARAMÈTRES MUTUELLE
+# =========================
 MUTUELLE_DEFAULTS = {
     'INSCRIPTION_AMOUNT': config('DEFAULT_INSCRIPTION_AMOUNT', default=150000, cast=int),
     'SOLIDARITE_AMOUNT': config('DEFAULT_SOLIDARITE_AMOUNT', default=10000, cast=int),
@@ -163,47 +193,20 @@ MUTUELLE_DEFAULTS = {
     'EXERCISE_DURATION_MONTHS': config('DEFAULT_EXERCISE_DURATION_MONTHS', default=12, cast=int),
 }
 
-# Logging configuration
+# =========================
+# LOGGING
+# =========================
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
-    'formatters': {
-        'verbose': {
-            'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
-            'style': '{',
-        },
-        'simple': {
-            'format': '{levelname} {message}',
-            'style': '{',
-        },
-    },
     'handlers': {
-        'file': {
-            'level': 'INFO',
-            'class': 'logging.FileHandler',
-            'filename': BASE_DIR / 'mutuelle.log',
-            'formatter': 'verbose',
-        },
         'console': {
-            'level': 'DEBUG',
             'class': 'logging.StreamHandler',
-            'formatter': 'simple',
         },
     },
     'root': {
-        'handlers': ['console', 'file'],
+        'handlers': ['console'],
         'level': 'INFO',
     },
-    'loggers': {
-        'django': {
-            'handlers': ['console', 'file'],
-            'level': 'INFO',
-            'propagate': False,
-        },
-        'mutuelle': {
-            'handlers': ['console', 'file'],
-            'level': 'DEBUG',
-            'propagate': False,
-        },
-    },
 }
+    

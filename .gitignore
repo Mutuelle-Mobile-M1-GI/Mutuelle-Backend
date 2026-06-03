@@ -16,6 +16,7 @@ media/
 # Environment
 .env
 venv/
+env/
 .venv/
 
 # IDE
