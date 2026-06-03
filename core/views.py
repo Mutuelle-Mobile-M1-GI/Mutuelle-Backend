@@ -834,58 +834,6 @@ class EmpruntCoefficientTierViewSet(viewsets.ModelViewSet):
 
 
 # ========== ENDPOINTS POUR EXÉCUTER LES SCRIPTS EN PRODUCTION ==========
-
-@api_view(['POST'])
-@permission_classes([AllowAny])
-def import_members(request):
-    """
-    Endpoint pour importer les membres via le script ajouter_profs.py
-    
-    POST /api/core/scripts/import-members/
-    
-    Permissions: Aucune (accessible à tous)
-    """
-    try:
-        # Récupérer le chemin du projet
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        script_path = os.path.join(project_root, 'scripts', 'ajouter_profs.py')
-        python_exe = sys.executable
-        
-        # Exécuter le script
-        result = subprocess.run(
-            [python_exe, script_path],
-            capture_output=True,
-            text=True,
-            timeout=300  # Timeout de 5 minutes
-        )
-        
-        if result.returncode == 0:
-            return Response({
-                "status": "success",
-                "message": "Import des membres exécuté avec succès",
-                "output": result.stdout,
-            }, status=status.HTTP_200_OK)
-        else:
-            return Response({
-                "status": "error",
-                "message": "Erreur lors de l'exécution du script",
-                "error": result.stderr,
-                "output": result.stdout,
-            }, status=status.HTTP_400_BAD_REQUEST)
-    
-    except subprocess.TimeoutExpired:
-        return Response({
-            "status": "error",
-            "message": "Le script a dépassé le délai d'exécution (5 minutes)",
-        }, status=status.HTTP_408_REQUEST_TIMEOUT)
-    
-    except Exception as e:
-        return Response({
-            "status": "error",
-            "message": f"Erreur lors de l'exécution du script: {str(e)}",
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def initialize_assistance_types(request):
