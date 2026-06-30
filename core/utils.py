@@ -356,14 +356,14 @@ def calculer_donnees_membre_completes(membre):
         'emprunt': emprunt_data,
         'renflouement': renflouement_data,
         'resume_financier': {
-            'patrimoine_total': epargne_totale,
+            'patrimoine_total': bilan_epargne,
             'obligations_totales': (
                 inscription_data['montant_restant_inscription'] +
                 solidarite_data['dette_solidarite_cumul'] +
                 renflouement_data['solde_renflouement_du'] +
                 emprunt_data['montant_restant_a_rembourser']
             ),
-            'situation_nette': epargne_totale - emprunt_data['montant_restant_a_rembourser']
+            'situation_nette': bilan_epargne - emprunt_data['montant_restant_a_rembourser']
         }
     }
     

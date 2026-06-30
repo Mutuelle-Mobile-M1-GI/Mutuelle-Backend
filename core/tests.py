@@ -4,6 +4,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from core.models import Exercice, Session, Membre, ConfigurationMutuelle
+from transactions.models import EpargneTransaction, RetraitEpargne
 
 
 class ExerciceStatusTransitionTests(TestCase):
@@ -14,6 +15,59 @@ class ExerciceStatusTransitionTests(TestCase):
         self.config = ConfigurationMutuelle.get_configuration()
         self.config.montant_solidarite = Decimal('1000')
         self.config.save()
+
+    def test_resume_financier_prend_en_compte_le_retrait_epargne(self):
+        User = get_user_model()
+        user = User.objects.create_user(username='patrimoine', password='pass')
+        exercice = Exercice.objects.create(
+            nom='Exercice Test',
+            date_debut=date.today(),
+            date_fin=date.today() + timedelta(days=365),
+            statut='EN_COURS'
+        )
+        session = Session.objects.create(
+            exercice=exercice,
+            date_session=date.today(),
+            statut='EN_COURS'
+        )
+        membre = Membre.objects.create(
+            utilisateur=user,
+            date_inscription=date.today(),
+            exercice_inscription=exercice,
+            session_inscription=session
+        )
+
+        EpargneTransaction.objects.create(
+            membre=membre,
+            type_transaction='DEPOT',
+            montant=Decimal('100000.00'),
+            session=session,
+            notes='Dépôt initial'
+        )
+        EpargneTransaction.objects.create(
+            membre=membre,
+            type_transaction='RETRAIT_EPARGNE',
+            montant=Decimal('-30000.00'),
+            session=session,
+            notes='Retrait test'
+        )
+        RetraitEpargne.objects.create(
+            membre=membre,
+            session=session,
+            montant=Decimal('30000.00'),
+            motif='Retrait test'
+        )
+
+        donnees = membre.get_donnees_completes()
+
+        self.assertEqual(
+            donnees['resume_financier']['patrimoine_total'],
+            Decimal('70000.00')
+        )
+        self.assertEqual(
+            donnees['resume_financier']['situation_nette'],
+            Decimal('70000.00')
+        )
 
     def test_first_exercice_sets_all_members_en_regle(self):
         exercice = Exercice.objects.create(

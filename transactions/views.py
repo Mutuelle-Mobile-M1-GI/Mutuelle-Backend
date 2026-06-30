@@ -324,8 +324,13 @@ class EpargneTransactionViewSet(viewsets.ModelViewSet):
     def statistiques(self, request):
         try:
             # 1. LOGIQUE ÉPARGNE (Fonds propres des membres)
-            # Uniquement ce qui appartient au membre
-            TYPES_EPARGNE = ['DEPOT', 'AJOUT_INTERET']
+            # Uniquement ce qui appartient au membre, y compris les retraits d'épargne
+            TYPES_EPARGNE = [
+                'DEPOT',
+                'AJOUT_INTERET',
+                'RETRAIT_EPARGNE',
+                'RETRAIT_RENFLOUEMENT'
+            ]
             
             # 2. LOGIQUE TRÉSORERIE (Flux de caisse)
             # Inclut les remboursements qui reviennent dans le coffre
@@ -333,9 +338,9 @@ class EpargneTransactionViewSet(viewsets.ModelViewSet):
             
 
             # 3. Calcul de l'Épargne Totale Globale (Dette de la mutuelle envers les membres)
+            # Les retraits d'épargne sont stockés en montants négatifs, donc ils doivent réduire le total
             total_epargne = EpargneTransaction.objects.filter(
-                type_transaction__in=TYPES_EPARGNE,
-                montant__gt=0
+                type_transaction__in=TYPES_EPARGNE
             ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
 
             # 4. Calcul du Trésor Total (Cash réellement présent dans le coffre)
@@ -346,7 +351,11 @@ class EpargneTransactionViewSet(viewsets.ModelViewSet):
             ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
             
             total_sorties = EpargneTransaction.objects.filter(
-                type_transaction__in=['RETRAIT_PRET', 'RETRAIT_RENFLOUEMENT'],
+                type_transaction__in=[
+                    'RETRAIT_PRET',
+                    'RETRAIT_EPARGNE',
+                    'RETRAIT_RENFLOUEMENT'
+                ],
                 montant__lt=0  # Sécurité : on prend les montants négatifs
             ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
             
@@ -358,8 +367,7 @@ class EpargneTransactionViewSet(viewsets.ModelViewSet):
                     Sum(
                         'transactions_epargne__montant',
                         filter=Q(
-                            transactions_epargne__type_transaction__in=TYPES_EPARGNE,
-                            transactions_epargne__montant__gt=0
+                            transactions_epargne__type_transaction__in=TYPES_EPARGNE
                         )
                     ),
                     Decimal('0'),
@@ -379,7 +387,7 @@ class EpargneTransactionViewSet(viewsets.ModelViewSet):
                 membres_data.append({
                     "id": m.id,
                     "nom": nom,
-                    "montant": float(m.total_cumule), # Somme DEPOT + INTERET
+                    "montant": float(m.total_cumule), # Solde net : dépôts + intérêts - retraits
                     "numero": m.numero_membre,
                     "statut": str(m.statut) # Convertit le statut (ex: NON_DEFINI) en texte
                 })

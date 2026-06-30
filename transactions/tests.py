@@ -1,10 +1,55 @@
-from django.test import TestCase
+from django.test import TestCase, Client
 from django.contrib.auth import get_user_model
+from django.urls import reverse
 from datetime import date, timedelta
 from decimal import Decimal
 
 from core.models import Exercice, Session, Membre, ConfigurationMutuelle
-from transactions.models import Emprunt, PenaliteEmprunt
+from transactions.models import Emprunt, PenaliteEmprunt, EpargneTransaction
+
+
+class EpargneStatistiquesTests(TestCase):
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(username='stat_user', password='testpass')
+        self.exercice = Exercice.objects.create(
+            nom='Exercice Stats',
+            date_debut=date.today(),
+            date_fin=date.today() + timedelta(days=365),
+            statut='EN_COURS'
+        )
+        self.session = Session.objects.create(
+            exercice=self.exercice,
+            date_session=date.today(),
+            statut='EN_COURS'
+        )
+        self.membre = Membre.objects.create(
+            utilisateur=self.user,
+            date_inscription=date.today(),
+            exercice_inscription=self.exercice,
+            session_inscription=self.session
+        )
+
+    def test_tresor_total_inclut_retrait_epargne(self):
+        EpargneTransaction.objects.create(
+            membre=self.membre,
+            type_transaction='DEPOT',
+            montant=Decimal('1000000.00'),
+            session=self.session
+        )
+        EpargneTransaction.objects.create(
+            membre=self.membre,
+            type_transaction='RETRAIT_EPARGNE',
+            montant=Decimal('-250000.00'),
+            session=self.session
+        )
+
+        response = self.client.get('/api/transactions/epargne-transactions/statistiques/')
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data['tresor_total'], 750000.0)
+        self.assertEqual(data['epargne_totale'], 750000.0)
+        self.assertEqual(data['tous_les_membres'][0]['montant'], 750000.0)
 
 
 class EmpruntPenaliteTests(TestCase):
