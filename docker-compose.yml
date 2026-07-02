@@ -1,0 +1,32 @@
+version: '3.9'
+
+services:
+  db:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: mutuelle_db
+      POSTGRES_USER: mutuelle_user
+      POSTGRES_PASSWORD: mutuelle_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - '5432:5432'
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - '8000:8000'
+    environment:
+      DEBUG: 'False'
+      SECRET_KEY: 'change-me-in-production'
+      DATABASE_URL: 'postgresql://mutuelle_user:mutuelle_password@db:5432/mutuelle_db'
+      ALLOWED_HOSTS: 'localhost,127.0.0.1,0.0.0.0'
+    depends_on:
+      - db
+
+volumes:
+  postgres_data:
