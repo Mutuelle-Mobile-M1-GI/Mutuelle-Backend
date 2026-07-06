@@ -8,7 +8,8 @@ from decimal import Decimal
 from django.test import TestCase, Client
 from django.urls import reverse
 from django.utils import timezone
-from core.models import Membre, Exercice, Session, Utilisateur
+from core.models import Membre, Exercice, Session
+from authentication.models import Utilisateur
 from transactions.models import (
     Renflouement, PaiementRenflouement, EpargneTransaction
 )
@@ -43,8 +44,7 @@ class PayerRenflouementAvecEpargneTestCase(TestCase):
         cls.session = Session.objects.create(
             nom='Session Test',
             exercice=cls.exercice,
-            date_debut=timezone.now(),
-            date_fin=timezone.now() + timezone.timedelta(days=30),
+            date_session=timezone.now().date(),
             statut='EN_COURS'
         )
         

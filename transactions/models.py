@@ -906,7 +906,7 @@ class Renflouement(models.Model):
                 'total': Decimal
             }
         """
-        if not self.ratio_caisse_inscription or not self.ratio_fonds_social:
+        if self.ratio_caisse_inscription is None or self.ratio_fonds_social is None:
             # Ancien système : tout va au fonds social
             return {
                 'caisse_inscription': Decimal('0'),
@@ -916,16 +916,13 @@ class Renflouement(models.Model):
         
         # Nouveau système proportionnel
         montant_caisse = (montant_paiement * self.ratio_caisse_inscription) / Decimal('100')
-        montant_fonds = (montant_paiement * self.ratio_fonds_social) / Decimal('100')
-        
-        # Arrondir pour éviter les problèmes de précision
         montant_caisse = montant_caisse.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-        montant_fonds = montant_fonds.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        montant_fonds = montant_paiement - montant_caisse
         
         return {
             'caisse_inscription': montant_caisse,
             'fonds_social': montant_fonds,
-            'total': montant_caisse + montant_fonds
+            'total': montant_paiement
         }
 
 class PaiementRenflouement(models.Model):

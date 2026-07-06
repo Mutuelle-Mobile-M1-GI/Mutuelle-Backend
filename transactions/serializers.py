@@ -311,57 +311,6 @@ class AssistanceAccordeeSerializer(serializers.ModelSerializer):
             'statut', 'statut_display', 'justification', 'notes'
         ]
 
-class RenflouementSerializer(serializers.ModelSerializer):
-    """
-    Serializer pour les renflouements AVEC TOUS LES CALCULS
-    """
-    membre_info = MembreSimpleSerializer(source='membre', read_only=True)
-    session_nom = serializers.CharField(source='session.nom', read_only=True)
-    type_cause_display = serializers.CharField(source='get_type_cause_display', read_only=True)
-    
-    # Calculs automatiques
-    montant_restant = serializers.ReadOnlyField()
-    is_solde = serializers.ReadOnlyField()
-    pourcentage_paye = serializers.ReadOnlyField()
-    
-    # Détails des paiements
-    paiements_details = serializers.SerializerMethodField()
-    
-    class Meta:
-        model = Renflouement
-        fields = [
-            'id', 'membre', 'membre_info', 'session', 'session_nom',
-            'montant_du', 'montant_paye', 'montant_restant', 'is_solde',
-            'pourcentage_paye', 'cause', 'type_cause', 'type_cause_display',
-            'date_creation', 'date_derniere_modification', 'paiements_details'
-        ]
-    
-    def get_paiements_details(self, obj):
-        paiements = obj.paiements.all()
-        return PaiementRenflouementSerializer(paiements, many=True).data
-class PaiementRenflouementSerializer(serializers.ModelSerializer):
-    """
-    Serializer pour les paiements de renflouement
-    """
-    renflouement_info = serializers.SerializerMethodField()
-    session_nom = serializers.CharField(source='session.nom', read_only=True)
-    
-    class Meta:
-        model = PaiementRenflouement
-        fields = [
-            'id', 'renflouement', 'renflouement_info', 'montant',
-            'session', 'session_nom', 'date_paiement', 'notes'
-        ]
-    
-    def get_renflouement_info(self, obj):
-        return {
-            'id': str(obj.renflouement.id),
-            'membre_numero': obj.renflouement.membre.numero_membre,
-            'membre_nom': obj.renflouement.membre.utilisateur.nom_complet,
-            'montant_total_du': obj.renflouement.montant_du,
-            'cause': obj.renflouement.cause
-        }
-
 
 class StatistiquesTransactionsSerializer(serializers.Serializer):
     """

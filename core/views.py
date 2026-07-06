@@ -3,7 +3,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from django_filters import rest_framework as filters
-from django.db import models
+from django.db import models, transaction
 from .models import (
     ConfigurationMutuelle, Exercice, Session, TypeAssistance,
     Membre, FondsSocial, CaisseInscription, EmpruntCoefficientTier
@@ -164,6 +164,50 @@ class ExerciceViewSet(viewsets.ModelViewSet):
         
         return Response({
             'message': 'Exercice modifié avec succès',
+            'data': serializer.data
+        }, status=status.HTTP_200_OK)
+    
+    @action(detail=True, methods=['patch'], permission_classes=[IsAdminOrReadOnly])
+    def clore(self, request, pk=None):
+        """
+        Clore un exercice EN_COURS :
+        - Génère les renflouements de fin d'exercice
+        - Clôture les sessions EN_COURS de cet exercice
+        - Passe l'exercice au statut TERMINE
+        """
+        exercice = self.get_object()
+
+        if exercice.statut != 'EN_COURS':
+            return Response({
+                'error': 'Impossible de clore cet exercice',
+                'details': f'Seuls les exercices EN_COURS peuvent être clôturés. Statut actuel: {exercice.statut}'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with transaction.atomic():
+                result = exercice.creer_renflouements_fin_exercice()
+
+                Session.objects.filter(
+                    exercice=exercice,
+                    statut='EN_COURS'
+                ).update(statut='TERMINEE')
+
+                exercice.statut = 'TERMINE'
+                exercice.save(update_fields=['statut', 'date_modification'])
+        except Exception as e:
+            return Response({
+                'error': 'Impossible de clore cet exercice',
+                'details': str(e)
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer = self.get_serializer(exercice)
+        return Response({
+            'message': f'Exercice "{exercice.nom}" clôturé avec succès',
+            'renflouements': {
+                'crees': result.get('renflouements_crees', 0),
+                'montant_par_membre': str(result.get('montant_par_membre', 0)),
+                'total_sorties': str(result.get('total_sorties_global', 0)),
+            },
             'data': serializer.data
         }, status=status.HTTP_200_OK)
     

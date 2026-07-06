@@ -315,23 +315,24 @@ class Exercice(models.Model):
                 previous_current_exercice = Exercice.objects.filter(
                     statut='EN_COURS'
                 ).first()
-                
+                exercice_precedent_deja_cloture = False
+
                 if previous_current_exercice:
                     print(f"\n📊 CLÔTURE AUTOMATIQUE DE L'EXERCICE PRÉCÉDENT: {previous_current_exercice.nom}")
                     print(f"{'='*70}")
-                    
+
                     # ✅ APPELER LA CRÉATION DES RENFLOUEMENTS
                     try:
                         result = previous_current_exercice.creer_renflouements_fin_exercice()
                         print(f"✅ Renflouements créés avec succès:")
-                        print(f"   - Total dépenses: {result['total_depenses']:,.0f} FCFA")
-                        print(f"   - Nombre de membres EN_REGLE: {result['nombre_membres']}")
+                        print(f"   - Total sorties: {result['total_sorties_global']:,.0f} FCFA")
+                        print(f"   - Nombre de membres EN_REGLE: {result['nombre_membres_en_regle']}")
                         print(f"   - Montant par membre: {result['montant_par_membre']:,.0f} FCFA")
                         print(f"   - Renflouements créés: {result['renflouements_crees']}")
                     except Exception as e:
                         print(f"❌ ERREUR lors de la création des renflouements: {e}")
                         # On continue même si ça échoue (pour ne pas bloquer la création du nouvel exercice)
-                    
+
                     # ✅ APPELER LE REPORT DES SOLIDARITÉS (dette/surplus vers le nouvel exercice)
                     try:
                         result_reports = previous_current_exercice.creer_reports_solidarite(exercice_cible=self)
@@ -342,18 +343,37 @@ class Exercice(models.Model):
                         print(f"❌ ERREUR lors de la création des reports de solidarité: {e}")
                         # On continue même si ça échoue
 
-                    
                     # 2️⃣ Marquer l'exercice EN_COURS précédent comme TERMINE
                     previous_current_exercice.statut = 'TERMINE'
                     previous_current_exercice.save(update_fields=['statut', 'date_modification'])
                     print(f"📝 Exercice précédent {previous_current_exercice.nom} marqué comme TERMINE")
-                
-                # 2️⃣ Marquer la session EN_COURS comme TERMINEE
-                current_session = Session.objects.filter(statut='EN_COURS').first()
-                if current_session:
-                    current_session.statut = 'TERMINEE'
-                    current_session.save(update_fields=['statut', 'date_modification'])
-                    print(f"📝 Session courante {current_session.nom} marquée comme TERMINEE")
+
+                    # 3️⃣ Marquer la session EN_COURS comme TERMINEE
+                    current_session = Session.objects.filter(statut='EN_COURS').first()
+                    if current_session:
+                        current_session.statut = 'TERMINEE'
+                        current_session.save(update_fields=['statut', 'date_modification'])
+                        print(f"📝 Session courante {current_session.nom} marquée comme TERMINEE")
+                else:
+                    # Exercice précédent clôturé manuellement (bouton « Terminer l'exercice »)
+                    previous_closed = Exercice.objects.filter(
+                        statut='TERMINE'
+                    ).order_by('-date_modification').first()
+
+                    if previous_closed:
+                        previous_current_exercice = previous_closed
+                        exercice_precedent_deja_cloture = True
+                        print(f"\nℹ️ NOUVEL EXERCICE après clôture manuelle de: {previous_closed.nom}")
+                        print(f"{'='*70}")
+                        print("ℹ️ Renflouements déjà générés lors de la clôture — pas de régénération")
+
+                        try:
+                            result_reports = previous_current_exercice.creer_reports_solidarite(exercice_cible=self)
+                            print(f"✅ Reports de solidarité créés: {result_reports['reports_crees']} rapport(s)")
+                            print(f"   - Dettes reportées: {result_reports['dettes_reportees']:,.0f} FCFA")
+                            print(f"   - Surplus reportés: {result_reports['surplus_reportes']:,.0f} FCFA")
+                        except Exception as e:
+                            print(f"❌ ERREUR lors de la création des reports de solidarité: {e}")
             
             # ✅ SAUVEGARDER L'EXERCICE
             super().save(*args, **kwargs)
@@ -362,7 +382,7 @@ class Exercice(models.Model):
             # ✅ TRANSITION D'EXERCICE: Conserver les statuts existants
             # Première exercice → tous EN_REGLE (ce sont les statuts par défaut)
             # Exercices suivants → conserve les statuts (EN_REGLE ou NON_EN_REGLE de l'exercice précédent)
-            first_exercice = previous_current_exercice is None
+            first_exercice = Exercice.objects.exclude(pk=self.pk).count() == 0
             if is_new and self.statut == 'EN_COURS' and first_exercice:
                 # Premier exercice: initialiser tous les membres à EN_REGLE (statut par défaut)
                 try:
@@ -599,9 +619,7 @@ class Exercice(models.Model):
                 ratio_caisse = ((sorties_caisse / total_sorties) * 100).quantize(
                     Decimal('0.01'), rounding=ROUND_HALF_UP
                 ) if total_sorties > 0 else Decimal('0')
-                ratio_fonds = ((sorties_fonds / total_sorties) * 100).quantize(
-                    Decimal('0.01'), rounding=ROUND_HALF_UP
-                ) if total_sorties > 0 else Decimal('0')
+                ratio_fonds = (Decimal('100.00') - ratio_caisse) if total_sorties > 0 else Decimal('0')
                 
                 result['ratio_caisse'] = ratio_caisse
                 result['ratio_fonds'] = ratio_fonds
