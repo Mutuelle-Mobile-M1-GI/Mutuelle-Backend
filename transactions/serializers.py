@@ -125,11 +125,16 @@ class PaiementSolidariteSerializer(serializers.ModelSerializer):
 
     def validate(self, data):
         membre = data.get('membre') or (self.instance.membre if self.instance else None)
-        if membre and not membre.inscription_terminee:
-            raise serializers.ValidationError(
-                "Le membre n'a pas terminé son inscription. "
-                "Le paiement de solidarité est interdit tant que l'inscription n'est pas complète."
-            )
+        if membre:
+            # Recalculer le flag inscription_terminee avant de vérifier
+            # (au cas où le flag ne serait pas à jour)
+            membre.update_inscription_terminee()
+            
+            if not membre.inscription_terminee:
+                raise serializers.ValidationError(
+                    "Le membre n'a pas terminé son inscription. "
+                    "Le paiement de solidarité est interdit tant que l'inscription n'est pas complète."
+                )
         return data
 
 class EpargneTransactionSerializer(serializers.ModelSerializer):

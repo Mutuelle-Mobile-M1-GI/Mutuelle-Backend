@@ -46,14 +46,38 @@ class ConfigurationMutuelleViewSet(viewsets.ModelViewSet):
     filterset_class = ConfigurationMutuelleFilter
     permission_classes = [IsAdminOrReadOnly]
     
-    @action(detail=False, methods=['get'], permission_classes=[AllowAny])
+    @action(detail=False, methods=['get', 'patch', 'put'], permission_classes=[AllowAny])
     def current(self, request):
         """
-        Retourne la configuration actuelle
+        GET : Retourne la configuration actuelle
+        PATCH/PUT : Modifie la configuration actuelle (admin seulement)
         """
         config = ConfigurationMutuelle.get_configuration()
-        serializer = self.get_serializer(config)
-        return Response(serializer.data)
+        
+        # GET
+        if request.method == 'GET':
+            serializer = self.get_serializer(config)
+            return Response(serializer.data)
+        
+        # PATCH/PUT - Modification (admin seulement)
+        if not request.user or not (request.user.is_staff or getattr(request.user, 'role', None) == 'ADMIN'):
+            return Response(
+                {'error': 'Seul un admin peut modifier la configuration'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        serializer = self.get_serializer(config, data=request.data, partial=(request.method == 'PATCH'))
+        if serializer.is_valid():
+            serializer.save()
+            return Response({
+                'success': True,
+                'message': 'Configuration mise à jour',
+                'data': serializer.data
+            })
+        return Response({
+            'success': False,
+            'errors': serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
 
 class ExerciceFilter(filters.FilterSet):
     """

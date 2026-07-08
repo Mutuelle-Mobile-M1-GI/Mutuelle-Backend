@@ -1540,8 +1540,13 @@ class FondsSocial(models.Model):
     
     @classmethod
     def get_fonds_actuel(cls):
-        """Retourne le fonds social de l'exercice en cours"""
+        """Retourne le fonds social de l'exercice en cours ou du dernier exercice si aucun n'est EN_COURS"""
         exercice_actuel = Exercice.get_exercice_en_cours()
+        
+        if not exercice_actuel:
+            # Si aucun exercice EN_COURS, chercher le dernier exercice (même s'il est TERMINÉ)
+            exercice_actuel = Exercice.objects.order_by('-date_modification').first()
+        
         if exercice_actuel:
             fonds, created = cls.objects.get_or_create(exercice=exercice_actuel)
             return fonds
@@ -1644,8 +1649,13 @@ class CaisseInscription(models.Model):
 
     @classmethod
     def get_caisse_actuelle(cls):
-        """Retourne la caisse inscription de l'exercice en cours."""
+        """Retourne la caisse inscription de l'exercice en cours ou du dernier exercice si aucun n'est EN_COURS."""
         exercice_actuel = Exercice.get_exercice_en_cours()
+        
+        if not exercice_actuel:
+            # Si aucun exercice EN_COURS, chercher le dernier exercice (même s'il est TERMINÉ)
+            exercice_actuel = Exercice.objects.order_by('-date_modification').first()
+        
         if exercice_actuel:
             caisse, created = cls.objects.get_or_create(
                 exercice=exercice_actuel,

@@ -1285,13 +1285,17 @@ class PaiementSolidarite(models.Model):
     def clean(self):
         from django.core.exceptions import ValidationError
 
-        if self.membre and not self.membre.inscription_terminee:
-            raise ValidationError({
-                'membre': (
-                    "Le membre n'a pas terminé son inscription. "
-                    "Le paiement de solidarité est interdit tant que l'inscription n'est pas complète."
-                )
-            })
+        if self.membre:
+            # Recalculer le flag avant de valider
+            self.membre.update_inscription_terminee()
+            
+            if not self.membre.inscription_terminee:
+                raise ValidationError({
+                    'membre': (
+                        "Le membre n'a pas terminé son inscription. "
+                        "Le paiement de solidarité est interdit tant que l'inscription n'est pas complète."
+                    )
+                })
 
     def save(self, *args, **kwargs):
         """

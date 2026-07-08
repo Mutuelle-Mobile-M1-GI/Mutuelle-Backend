@@ -937,38 +937,338 @@ class RenflouementViewSet(viewsets.ModelViewSet):
     def statistiques(self, request):
         """
         Statistiques des renflouements
-        """
-        queryset = self.get_queryset()
         
-        total_renflouements = queryset.count()
-        renflouements_soldes = queryset.filter(montant_paye__gte=F('montant_du')).count()
+        LOGIQUE CORRECTE:
+        - total_du = SUM des dépenses de l'exercice (pas la somme des renflouements par membre!)
+        - C'est le montant TOTAL à collecter auprès de TOUS les membres
+        - Chaque membre paie: total_du / nombre_membres_en_regle
+        
+        Paramètres optionnels:
+        - exercice_id: UUID de l'exercice (défaut: exercice EN_COURS ou dernier exercice)
+        - include_all: Si 'true', agrège TOUS les renflouements (défaut: false = exercice actuel seulement)
+        """
+        from core.models import Exercice, DépenseExercice
+        
+        # Paramètres
+        exercice_id = request.query_params.get('exercice_id')
+        include_all = request.query_params.get('include_all', 'false').lower() == 'true'
+        
+        # Trouver l'exercice cible
+        if exercice_id:
+            exercice_courant = Exercice.objects.filter(id=exercice_id).first()
+        elif not include_all:
+            # Par défaut : exercice EN_COURS ou dernier exercice
+            exercice_courant = Exercice.get_exercice_en_cours()
+            if not exercice_courant:
+                exercice_courant = Exercice.objects.order_by('-date_modification').first()
+        else:
+            exercice_courant = None
+        
+        # ✅ CORRECTION: Calculer les stats À PARTIR DES DÉPENSES, pas des renflouements
+        if exercice_courant:
+            # Dépenses totales de l'exercice
+            total_depenses = DépenseExercice.objects.filter(
+                exercice=exercice_courant
+            ).aggregate(total=Sum('montant'))['total'] or Decimal('0')
+            
+            # Renflouements créés pour cet exercice
+            renflouements = self.get_queryset().filter(
+                exercice_renflouement=exercice_courant,
+                type_cause='RENFLOUEMENT_FIN_EXERCICE'
+            )
+        else:
+            # Tous les renflouements
+            total_depenses = DépenseExercice.objects.aggregate(
+                total=Sum('montant'))['total'] or Decimal('0')
+            renflouements = self.get_queryset()
+        
+        # Calculs basés sur les renflouements PAYÉS (pas les montants dus)
+        montant_total_paye = renflouements.aggregate(
+            total=Sum('montant_paye'))['total'] or Decimal('0')
+        
+        # Le total_du = les dépenses totales, qui ont été réparties entre les membres
+        total_renflouements = renflouements.count()
+        renflouements_soldes = renflouements.filter(montant_paye__gte=F('montant_du')).count()
         renflouements_non_soldes = total_renflouements - renflouements_soldes
         
-        montant_total_du = queryset.aggregate(
-            total=Sum('montant_du'))['total'] or Decimal('0')
-        montant_total_paye = queryset.aggregate(
-            total=Sum('montant_paye'))['total'] or Decimal('0')
-        montant_restant = montant_total_du - montant_total_paye
+        montant_restant = total_depenses - montant_total_paye
+        
+        # Exercice actuel pour le contexte
+        exercice_affiche = exercice_courant or Exercice.objects.order_by('-date_modification').first()
         
         return Response({
+            'exercice_contexte': {
+                'id': str(exercice_affiche.id) if exercice_affiche else None,
+                'nom': exercice_affiche.nom if exercice_affiche else None,
+                'statut': exercice_affiche.statut if exercice_affiche else None
+            },
             'nombre_renflouements': {
                 'total': total_renflouements,
                 'soldes': renflouements_soldes,
                 'non_soldes': renflouements_non_soldes
             },
             'montants': {
-                'total_du': montant_total_du,
+                'total_du': total_depenses,  # ✅ Les dépenses totales, pas la somme des renflouements
                 'total_paye': montant_total_paye,
                 'montant_restant': montant_restant
             },
             'pourcentages': {
-                'taux_recouvrement': (montant_total_paye / montant_total_du * 100) if montant_total_du > 0 else 0,
+                'taux_recouvrement': (montant_total_paye / total_depenses * 100) if total_depenses > 0 else 0,
                 'taux_solde': (renflouements_soldes / total_renflouements * 100) if total_renflouements > 0 else 0
+            },
+            'note': 'total_du = dépenses totales de l\'exercice (réparties entre les membres)'
+        })
+    
+    @action(detail=False, methods=['get'], permission_classes=[AllowAny])
+    def par_membre(self, request):
+        """
+        ✅ NOUVEAU: Retourne les renflouements cumulés par membre
+        
+        GET /transactions/renflouements/par_membre/?membre_id=xxx
+        
+        Retourne :
+        - Liste de tous les renflouements du membre (par exercice)
+        - Cumuls totaux (tous exercices confondus)
+        - Total dû, total payé, montant restant
+        
+        Exemple:
+        {
+            "membre": {
+                "id": "...",
+                "numero_membre": "ENS-001",
+                "nom_complet": "Jean Dupont"
+            },
+            "renflouements_par_exercice": [
+                {
+                    "exercice": "ARNO",
+                    "exercice_id": "...",
+                    "montant_du": 100000,
+                    "montant_paye": 50000,
+                    "montant_restant": 50000,
+                    "renflouements": [...]
+                },
+                {
+                    "exercice": "2027",
+                    "exercice_id": "...",
+                    "montant_du": 80000,
+                    "montant_paye": 80000,
+                    "montant_restant": 0,
+                    "renflouements": [...]
+                }
+            ],
+            "cumuls_totaux": {
+                "total_du": 180000,
+                "total_paye": 130000,
+                "montant_restant": 50000,
+                "pourcentage_paye": 72.22
+            }
+        }
+        """
+        from core.models import Membre
+        from decimal import Decimal
+        
+        # Récupérer le membre_id
+        membre_id = request.query_params.get('membre_id')
+        if not membre_id:
+            return Response(
+                {'error': 'Paramètre membre_id requis'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            membre = Membre.objects.get(id=membre_id)
+        except Membre.DoesNotExist:
+            return Response(
+                {'error': 'Membre non trouvé'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Récupérer tous les renflouements du membre
+        renflouements = self.get_queryset().filter(
+            membre=membre,
+            type_cause='RENFLOUEMENT_FIN_EXERCICE'
+        ).select_related('exercice_renflouement')
+        
+        # Grouper par exercice
+        from django.db.models import Sum
+        from itertools import groupby
+        
+        renflouements_par_exercice = []
+        cumul_total_du = Decimal('0')
+        cumul_total_paye = Decimal('0')
+        
+        # Grouper par exercice
+        renflouements_groupes = {}
+        for renflouement in renflouements:
+            exercice_id = str(renflouement.exercice_renflouement.id) if renflouement.exercice_renflouement else 'NULL'
+            if exercice_id not in renflouements_groupes:
+                renflouements_groupes[exercice_id] = {
+                    'exercice': renflouement.exercice_renflouement.nom if renflouement.exercice_renflouement else 'Ancien',
+                    'exercice_id': exercice_id,
+                    'montant_du': Decimal('0'),
+                    'montant_paye': Decimal('0'),
+                    'renflouements': []
+                }
+            
+            renflouements_groupes[exercice_id]['montant_du'] += renflouement.montant_du
+            renflouements_groupes[exercice_id]['montant_paye'] += renflouement.montant_paye
+            renflouements_groupes[exercice_id]['renflouements'].append(renflouement)
+        
+        # Construire la réponse par exercice
+        for exercice_id, data in renflouements_groupes.items():
+            montant_du = data['montant_du']
+            montant_paye = data['montant_paye']
+            montant_restant = montant_du - montant_paye
+            
+            renflouements_par_exercice.append({
+                'exercice': data['exercice'],
+                'exercice_id': data['exercice_id'],
+                'montant_du': float(montant_du),
+                'montant_paye': float(montant_paye),
+                'montant_restant': float(montant_restant),
+                'pourcentage_paye': float((montant_paye / montant_du * 100) if montant_du > 0 else 0),
+                'renflouements': RenflouementSerializer(data['renflouements'], many=True).data
+            })
+            
+            cumul_total_du += montant_du
+            cumul_total_paye += montant_paye
+        
+        cumul_total_restant = cumul_total_du - cumul_total_paye
+        
+        return Response({
+            'membre': {
+                'id': str(membre.id),
+                'numero_membre': membre.numero_membre,
+                'nom_complet': membre.utilisateur.nom_complet if hasattr(membre.utilisateur, 'nom_complet') else f"{membre.utilisateur.first_name} {membre.utilisateur.last_name}",
+                'statut': membre.statut
+            },
+            'renflouements_par_exercice': sorted(
+                renflouements_par_exercice,
+                key=lambda x: x['exercice'],
+                reverse=True
+            ),
+            'cumuls_totaux': {
+                'total_du': float(cumul_total_du),
+                'total_paye': float(cumul_total_paye),
+                'montant_restant': float(cumul_total_restant),
+                'pourcentage_paye': float((cumul_total_paye / cumul_total_du * 100) if cumul_total_du > 0 else 0),
+                'nombre_exercices': len(renflouements_groupes)
             }
         })
     
-    @action(detail=True, methods=['post'], permission_classes=[AllowAny])
-    def payer_avec_epargne(self, request, pk=None):
+    @action(detail=False, methods=['get'], permission_classes=[AllowAny])
+    def exercice_detail(self, request):
+        """
+        ✅ MASTER ENDPOINT: Détail complet d'un exercice pour affichage frontend
+        
+        GET /transactions/renflouements/exercice_detail/?exercice_id=xxx
+        
+        Retourne : Renflouements + Paiements + Stats consolidées par membre
+        
+        Structure:
+        {
+            "exercice": {...},
+            "par_membre": [
+                {
+                    "membre": {...},
+                    "renflouement": {montant_du, ...},
+                    "paiements": [...],
+                    "totals": {montant_du, montant_paye, montant_restant, ...}
+                }
+            ],
+            "statistiques_globales": {...}
+        }
+        """
+        from core.models import Exercice, Membre
+        
+        exercice_id = request.query_params.get('exercice_id')
+        if not exercice_id:
+            return Response({'error': 'Paramètre exercice_id requis'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            exercice = Exercice.objects.get(id=exercice_id)
+        except Exercice.DoesNotExist:
+            return Response({'error': 'Exercice non trouvé'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Tous les renflouements de cet exercice
+        renflouements = Renflouement.objects.filter(
+            exercice_renflouement=exercice,
+            type_cause='RENFLOUEMENT_FIN_EXERCICE'
+        ).select_related('membre__utilisateur')
+        
+        # Tous les paiements de cet exercice
+        from transactions.models import PaiementRenflouement
+        paiements = PaiementRenflouement.objects.filter(
+            renflouement__exercice_renflouement=exercice
+        ).select_related('renflouement__membre__utilisateur')
+        
+        # Grouper par membre
+        membres_data = {}
+        
+        # Ajouter les renflouements
+        for renflouement in renflouements:
+            membre_id = str(renflouement.membre.id)
+            if membre_id not in membres_data:
+                membres_data[membre_id] = {
+                    'membre': {
+                        'id': str(renflouement.membre.id),
+                        'numero_membre': renflouement.membre.numero_membre,
+                        'nom_complet': renflouement.membre.utilisateur.nom_complet if hasattr(renflouement.membre.utilisateur, 'nom_complet') else f"{renflouement.membre.utilisateur.first_name} {renflouement.membre.utilisateur.last_name}",
+                        'statut': renflouement.membre.statut
+                    },
+                    'renflouement': RenflouementSerializer(renflouement).data,
+                    'paiements': [],
+                    'totals': {
+                        'montant_du': float(renflouement.montant_du),
+                        'montant_paye': float(renflouement.montant_paye),
+                        'montant_restant': float(renflouement.montant_restant),
+                        'pourcentage_paye': float(renflouement.pourcentage_paye) if renflouement.montant_du > 0 else 0
+                    }
+                }
+        
+        # Ajouter les paiements
+        for paiement in paiements:
+            membre_id = str(paiement.renflouement.membre.id)
+            if membre_id in membres_data:
+                membres_data[membre_id]['paiements'].append({
+                    'id': str(paiement.id),
+                    'montant': float(paiement.montant),
+                    'montant_caisse_inscription': float(paiement.montant_caisse_inscription or 0),
+                    'montant_fonds_social': float(paiement.montant_fonds_social or 0),
+                    'date_paiement': paiement.date_paiement,
+                    'notes': paiement.notes
+                })
+        
+        # Calculer les stats globales
+        total_du_global = sum(data['totals']['montant_du'] for data in membres_data.values())
+        total_paye_global = sum(data['totals']['montant_paye'] for data in membres_data.values())
+        total_restant_global = total_du_global - total_paye_global
+        
+        # Compter les statuts
+        members_soldes = sum(1 for data in membres_data.values() if data['totals']['montant_restant'] <= 0)
+        members_partiels = sum(1 for data in membres_data.values() if 0 < data['totals']['montant_restant'] < data['totals']['montant_du'])
+        members_non_payes = sum(1 for data in membres_data.values() if data['totals']['montant_paye'] == 0)
+        
+        return Response({
+            'exercice': {
+                'id': str(exercice.id),
+                'nom': exercice.nom,
+                'statut': exercice.statut,
+                'date_debut': exercice.date_debut,
+                'date_fin': exercice.date_fin
+            },
+            'par_membre': list(membres_data.values()),
+            'statistiques_globales': {
+                'nombre_membres': len(membres_data),
+                'nombre_membres_soldes': members_soldes,
+                'nombre_membres_partiels': members_partiels,
+                'nombre_membres_non_payes': members_non_payes,
+                'montant_total_du': total_du_global,
+                'montant_total_paye': total_paye_global,
+                'montant_total_restant': total_restant_global,
+                'taux_recouvrement': (total_paye_global / total_du_global * 100) if total_du_global > 0 else 0
+            }
+        })
         """
         Payer un renflouement en puisant dans l'épargne personnelle du membre
         
