@@ -48,6 +48,7 @@ class ExerciceSerializer(serializers.ModelSerializer):
     is_en_cours = serializers.ReadOnlyField()
     nombre_sessions = serializers.SerializerMethodField()
     fonds_social_info = serializers.SerializerMethodField()
+    renflouement_stats = serializers.SerializerMethodField()
     
     
     class Meta:
@@ -55,6 +56,7 @@ class ExerciceSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'nom', 'date_debut', 'date_fin', 'statut', 'description',
             'is_en_cours', 'nombre_sessions', 'fonds_social_info','emprunt_tiers',
+            'renflouement_stats',
             'date_creation', 'date_modification'
         ]
     
@@ -70,6 +72,41 @@ class ExerciceSerializer(serializers.ModelSerializer):
             }
         except:
             return {'montant_total': Decimal('0'), 'derniere_modification': None}
+    
+    def get_renflouement_stats(self, obj):
+        """
+        Retourne les stats de renflouement pour cet exercice
+        """
+        from transactions.models import Renflouement
+        from django.db.models import Sum, F
+        
+        # Récupérer tous les renflouements de cet exercice
+        renflouements = Renflouement.objects.filter(
+            exercice_renflouement=obj,
+            type_cause='RENFLOUEMENT_FIN_EXERCICE'
+        )
+        
+        # Calculer les stats
+        stats = renflouements.aggregate(
+            montant_total_du=Sum('montant_du'),
+            montant_total_paye=Sum('montant_paye')
+        )
+        
+        montant_du = stats.get('montant_total_du') or Decimal('0')
+        montant_paye = stats.get('montant_total_paye') or Decimal('0')
+        montant_restant = montant_du - montant_paye
+        
+        # Compter les renflouements soldés (montant_paye >= montant_du)
+        nombre_soldes = renflouements.filter(montant_paye__gte=F('montant_du')).count()
+        
+        return {
+            'montant_total_du': float(montant_du),
+            'montant_total_paye': float(montant_paye),
+            'montant_total_restant': float(montant_restant),
+            'taux_recouvrement': float((montant_paye / montant_du * 100) if montant_du > 0 else 0),
+            'nombre_renflouements': renflouements.count(),
+            'nombre_soldes': nombre_soldes,
+        }
 
 class SessionSerializer(serializers.ModelSerializer):
     """
