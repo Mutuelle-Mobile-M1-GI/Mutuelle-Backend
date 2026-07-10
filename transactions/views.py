@@ -1269,6 +1269,9 @@ class RenflouementViewSet(viewsets.ModelViewSet):
                 'taux_recouvrement': (total_paye_global / total_du_global * 100) if total_du_global > 0 else 0
             }
         })
+
+    @action(detail=True, methods=['post'], permission_classes=[AllowAny], url_path='payer_avec_epargne')
+    def payer_avec_epargne(self, request, pk=None):
         """
         Payer un renflouement en puisant dans l'épargne personnelle du membre
         
@@ -1612,12 +1615,28 @@ class AssistanceAccordeeViewSet(viewsets.ModelViewSet):
                 'error': 'Erreur lors de la création',
                 'details': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+class PaiementRenflouementFilter(filters.FilterSet):
+    """
+    Filtres pour les paiements de renflouement.
+    La session du paiement = session où l'opération a été encaissée (exercice en cours).
+    """
+    renflouement = filters.UUIDFilter()
+    session = filters.UUIDFilter()
+    exercice = filters.UUIDFilter(field_name='session__exercice')
+    membre = filters.UUIDFilter(field_name='renflouement__membre')
+
+    class Meta:
+        model = PaiementRenflouement
+        fields = ['renflouement', 'session', 'montant']
+
+
 class PaiementRenflouementViewSet(viewsets.ModelViewSet):
     queryset = PaiementRenflouement.objects.select_related(
-        'renflouement__membre__utilisateur', 'session'
+        'renflouement__membre__utilisateur', 'session', 'session__exercice',
+        'renflouement__exercice_renflouement',
     ).all()
     serializer_class = PaiementRenflouementSerializer
-    filterset_fields = ['renflouement', 'session', 'montant']
+    filterset_class = PaiementRenflouementFilter
     search_fields = ['renflouement__membre__numero_membre', 'notes']
     ordering = ['-date_paiement']
     permission_classes = [AllowAny]
